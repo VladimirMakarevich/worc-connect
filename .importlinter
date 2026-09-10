@@ -1,0 +1,44 @@
+[importlinter]
+root_package = worc_connect
+
+# The architectural invariant of this package, machine-checked: the core works on a normalized
+# WorkItem and the TrackerAdapter protocol only, and never learns a tracker's CLI or API. Adapters are
+# resolved through the `worc_connect.trackers` entry-point group by the composition root (cli.py).
+[importlinter:contract:core-not-concrete-adapters]
+name = The core never imports a concrete tracker adapter
+type = forbidden
+source_modules =
+    worc_connect.core
+forbidden_modules =
+    worc_connect.trackers.github
+
+# Adapters are leaves: they know one tracker and nothing about the loop, the configuration file or the
+# CLI. The item model (`worc_connect.core.items`) is the one core module an adapter may import; add it
+# here as `ignore_imports = worc_connect.trackers.** -> worc_connect.core.items` together with the
+# `worc_connect.core` line once that module exists.
+[importlinter:contract:adapters-are-leaf]
+name = A tracker adapter does not depend on the CLI or the configuration
+type = forbidden
+source_modules =
+    worc_connect.trackers.github
+forbidden_modules =
+    worc_connect.cli
+    worc_connect.config
+
+[importlinter:contract:core-below-cli]
+name = The core does not depend on the CLI
+type = forbidden
+source_modules =
+    worc_connect.core
+forbidden_modules =
+    worc_connect.cli
+
+[importlinter:contract:config-is-leaf]
+name = Configuration is shapes only and depends on nothing above it
+type = forbidden
+source_modules =
+    worc_connect.config
+forbidden_modules =
+    worc_connect.core
+    worc_connect.trackers
+    worc_connect.cli

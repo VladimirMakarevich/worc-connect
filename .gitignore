@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.import_linter_cache/
+.coverage
+htmlcov/
+uv.lock
+
+# Secrets (DO NOT commit). The connector holds no token of its own — `gh` owns the login — but a
+# stray .env must never land here either.
+.env
+secrets/
+*.key
+*.pem
+
+# The connector's runtime home when it is run against a clone of this repository (config.yaml,
+# state.db, connect.log, connect.pid) — local-only, like worc's own `.worc/`.
+.worc-connect/
+.worc/
+.worc-io/
+
+# Node dependencies. This project ships no JavaScript; the directory only appears if the Markdown
+# linter is ever installed here as a package instead of resolved from a checkout of its own.
+node_modules/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Claude Code local state
+.claude/settings.local.json
+.claude/worktrees/

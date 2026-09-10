@@ -1,0 +1,148 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "worc-connect"
+# Static until the first release; switch to a tag-derived version (hatch-vcs) when releases start.
+version = "0.1.0.dev0"
+description = "Tracker connector for wastech-orchestrator (worc): gated work items in, worc tasks out, status written back to the tracker"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Vladimir Makarevich", email = "vladimir.makarevich.23@gmail.com" }]
+# Runtime dependencies join this list together with the code that imports them (deptry fails on a
+# declared-but-unused package). The configuration loader brings PyYAML; nothing else is expected.
+dependencies = []
+
+[project.optional-dependencies]
+# Tracker adapters. `gh` is an executable on PATH, not a Python package, so the GitHub extra pins no
+# distribution today; it exists so that `pip install "worc-connect[github]"` is the documented install
+# and an adapter that later needs a client library has a declared home for it.
+github = []
+dev = [
+    # The extended lint set (FURB, PERF, PTH, T20, RUF, …) needs a recent ruff; older ruff aborts on
+    # unknown rule selectors. Keep this floor at/above the version whose rules are selected below.
+    "ruff>=0.15",
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "pytest-xdist>=3.6",   # parallel test execution (`-n auto`)
+    "import-linter>=2.0",  # architectural import-boundary contracts (.importlinter)
+    "pre-commit>=3.7",     # local quality gate mirroring CI (.pre-commit-config.yaml)
+    "interrogate>=1.7",    # docstring-coverage threshold
+    "vulture>=2.11",       # dead-code detection
+    "deptry>=0.20",        # dependency hygiene
+]
+
+[project.scripts]
+worc-connect = "worc_connect.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/worc_connect"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Preview mode is on ONLY for the rules named explicitly below (`explicit-preview-rules`): the
+# module-shape ratchets PLR0904 / PLR0914 / PLR1702 are still preview in ruff and there is no stable
+# equivalent, while a blanket `preview = true` would make every lint run track ruff's moving edge.
+preview = true
+explicit-preview-rules = true
+select = [
+    "E", "F", "I", "UP", "B", "SIM", "C4",       # correctness, imports, modern syntax, bugbear
+    "FA", "TID", "ISC", "ICN", "PIE", "RSE",     # structural correctness / readability
+    "LOG", "G",                                   # logging discipline
+    "DTZ",                                        # tz-aware datetime
+    "PTH",                                        # pathlib over os.path — cross-platform
+    "PERF", "FURB",                               # perf + modern idioms
+    "YTT", "ASYNC", "INP",                        # correctness
+    "T20",                                        # no stray print() outside the presentation layer
+    "RUF",                                        # ruff-specific (unused noqa, sorted __all__, …)
+    "C901",                                       # cyclomatic complexity (mccabe)
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915",   # too many returns / branches / args / statements
+    "PLR0917",                                    # too many positional arguments (use keywords)
+    "PLR0904", "PLR0914", "PLR1702",              # (preview) public methods / locals / nesting depth
+    "PLW0603",                                    # no `global` statement — no hidden module state
+]
+ignore = [
+    "ISC001",  # conflicts with the formatter (Astral's recommendation when ruff format is used)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The CLI is the presentation layer: print() is user-facing output there, not logging.
+"src/worc_connect/cli.py" = ["T20"]
+# Claude Code hook scripts and the repository tools print to stdout/stderr — that is their output.
+".claude/**" = ["T20"]
+"tools/**" = ["T20"]
+# Tests: assert is the point; docstrings / magic values / private access / implicit namespace are
+# test idioms, and the size/complexity ratchets target production maintainability, not tests.
+"tests/**" = [
+    "S101", "PLR2004", "SLF001", "INP001", "ARG", "D", "T20", "RUF059", "PERF",
+    "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915",
+]
+
+# A fresh codebase starts at the thresholds the orchestrator is still burning down toward; there is
+# no baseline of offenders to carry, so a violation anywhere is a new one.
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 6
+max-positional-args = 4
+max-branches = 12
+max-returns = 6
+max-statements = 50
+max-locals = 15
+max-public-methods = 10
+max-nested-blocks = 4
+
+# Module size (`python tools/size_gate.py`, per commit and in CI). ruff bounds a function, nothing
+# bounds a file — and a file is what a reader or an agent loads whole. Physical lines per glob; a file
+# matched by several globs is held to the smallest budget. Lower a number as the code allows; never
+# raise one to silence a finding — the fix is a split.
+[tool.size_gate.max_lines]
+"src/**/*.py" = 500
+"tests/**/*.py" = 800
+"tools/*.py" = 300
+".claude/hooks/*.py" = 200
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+exclude = ["^tests/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The src layout is importable without installing the package, so the pre-commit-owned pytest
+# environment (which never installs it) tests the working tree rather than an installed snapshot.
+pythonpath = ["src"]
+# `-n auto` (pytest-xdist) fans the suite across CPU cores; the suite will spawn fake `gh` / `worc`
+# processes, which is I/O bound. Use `-n0` for a serial run when debugging (`--pdb`, `-s`).
+addopts = "-q -n auto --strict-markers"
+markers = [
+    "slow: integration test that spawns fake executables or a real process tree (deselect with -m 'not slow' for a fast inner loop)",
+]
+
+# Docstring coverage (`interrogate src`). A greenfield codebase documents everything public from the
+# first commit; the floor leaves room only for the odd self-documenting dataclass.
+[tool.interrogate]
+fail-under = 90
+ignore-init-method = true
+ignore-magic = true
+ignore-nested-functions = true
+ignore-private = true
+
+# Dead code (`vulture`). High confidence only: Protocol methods and dataclass fields read dynamically
+# flood the 60% level with false positives.
+[tool.vulture]
+paths = ["src"]
+min_confidence = 80
+ignore_names = ["exc_type", "exc_val", "exc_tb", "tb"]
+
+# Dependency hygiene (`deptry src`). The dev extra is tooling that src never imports.
+[tool.deptry]
+optional_dependencies_dev_groups = ["dev"]

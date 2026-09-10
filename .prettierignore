@@ -1,0 +1,22 @@
+# Prettier ignore. Markdown docs are formatted with proseWrap:never (no hard line-wrapping).
+# Reflow ONLY documentation — never the categories below.
+
+# VCS / build / caches (match anywhere)
+.git/
+node_modules/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Shipped package data, not docs: anything under src/ (a packaged flow, a role prompt) is a runtime
+# asset copied into a target repository. Edit it by hand in the same one-paragraph-per-line style.
+/src/
+
+# Runtime homes
+/.worc-connect/
+/.worc/

@@ -1,0 +1,7 @@
+# Normalize line endings for cross-platform development.
+* text=auto eol=lf
+
+# Explicit binaries/exceptions can be added below if needed.
+*.png binary
+*.jpg binary
+*.db binary

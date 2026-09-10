@@ -1,0 +1,94 @@
+# Local quality gate — mirrors CI. Per commit: ruff, ruff format, mypy, import-linter, the size gate,
+# the Markdown gate. Per push (the heavier gates): interrogate, vulture, deptry, pytest. Install once:
+#   pre-commit install && pre-commit install --hook-type pre-push
+#
+# Every hook runs in an environment pre-commit builds and owns (`language: python` plus pinned
+# `additional_dependencies`), never through whatever `PATH` the caller happens to have. A commit made
+# from an IDE, a GUI client or a shell without the dev virtualenv activated must see the same gate as
+# one made from an activated shell — with `language: system` the first of those failed with
+# "Executable `ruff` not found", and on macOS there is no `python` on PATH at all, only `python3`.
+# The package itself is not installed into those environments: mypy discovers the src layout on its
+# own, import-linter is pointed at `src/` by tools/lint_imports.py, and pytest reads
+# `pythonpath = ["src"]` from pyproject.toml — so every hook lints the working tree, never a stale
+# installed copy. The pins below match the `dev` extra's floors; bump both together.
+minimum_pre_commit_version: "4.0.0"
+repos:
+  - repo: local
+    hooks:
+      # Whole-tree runs (no explicit filenames) so pre-commit mirrors CI's `ruff check .` /
+      # `ruff format --check .` exactly — same .py/.pyi walk and excludes.
+      - id: ruff-check
+        name: ruff check
+        entry: ruff check
+        language: python
+        additional_dependencies: ["ruff==0.16.7"]
+        types_or: [python, pyi]
+        pass_filenames: false
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format --check
+        language: python
+        additional_dependencies: ["ruff==0.16.7"]
+        types_or: [python, pyi]
+        pass_filenames: false
+      - id: mypy
+        name: mypy src
+        entry: mypy src
+        language: python
+        additional_dependencies: ["mypy==2.3.1"]
+        pass_filenames: false
+        files: ^src/.*\.py$
+      - id: import-linter
+        name: import-linter
+        entry: python tools/lint_imports.py
+        language: python
+        additional_dependencies: ["import-linter==2.15"]
+        pass_filenames: false
+        files: (\.py$|^\.importlinter$)
+      # Module line budgets ([tool.size_gate.max_lines] in pyproject.toml). Per commit, because the
+      # commit that crosses a budget is the cheapest one to split. Stdlib only.
+      - id: size-gate
+        name: size gate (module line budgets)
+        entry: python tools/size_gate.py
+        language: python
+        pass_filenames: false
+        files: (\.py$|^pyproject\.toml$)
+      # The Markdown corpus: links, anchors, reachability, size budgets. No explicit filenames: the
+      # gate's own config defines the corpus, and the graph rules need all of it. The linter lives in a
+      # separate, unpublished repository and runs on node; when it is not available locally the
+      # runner prints how to enable it and passes.
+      - id: mdlint
+        name: markdown context (wastech-mdlint)
+        entry: python tools/mdlint.py
+        language: python
+        pass_filenames: false
+        files: (\.md$|^wastech-mdlint.*\.json$)
+      # Heavier gates on push (not every commit): the maintainability ratchets + full test suite.
+      - id: interrogate
+        name: interrogate (docstring coverage)
+        entry: interrogate src
+        language: python
+        additional_dependencies: ["interrogate==1.7.0"]
+        pass_filenames: false
+        stages: [pre-push]
+      - id: vulture
+        name: vulture (dead code)
+        entry: vulture
+        language: python
+        additional_dependencies: ["vulture==2.16"]
+        pass_filenames: false
+        stages: [pre-push]
+      - id: deptry
+        name: deptry (dependency hygiene)
+        entry: deptry src
+        language: python
+        additional_dependencies: ["deptry==0.25.1"]
+        pass_filenames: false
+        stages: [pre-push]
+      - id: pytest
+        name: pytest
+        entry: pytest -q
+        language: python
+        additional_dependencies: ["pytest==9.1.1", "pytest-xdist==3.8.0"]
+        pass_filenames: false
+        stages: [pre-push]

@@ -26,8 +26,8 @@ pytestmark = pytest.mark.slow
 SINCE = datetime(2026, 9, 10, 10, 0, tzinfo=UTC)
 
 
-def adapter(*, repo: str = "OWNER/REPO") -> GitHubAdapter:
-    return GitHubAdapter(command=GhCommand(repo=repo, timeout=30.0))
+def adapter(*, repo: str = "OWNER/REPO", labels_prefix: str = "worc:") -> GitHubAdapter:
+    return GitHubAdapter(command=GhCommand(repo=repo, timeout=30.0), labels_prefix=labels_prefix)
 
 
 def test_the_fake_is_resolved_on_path_under_the_real_name(fake_gh: FakeGh) -> None:
@@ -277,7 +277,7 @@ def test_a_missing_gh_is_an_unavailable_tracker(
 def test_the_entry_point_factory_builds_a_pinned_adapter(fake_gh: FakeGh) -> None:
     fake_gh.respond("issue list", payload=[])
 
-    build_adapter(repo="OTHER/THING").list_items(None)
+    build_adapter(repo="OTHER/THING", labels_prefix="worc:").list_items(None)
 
     argv = fake_gh.calls_for("issue list")[0]
     assert argv[argv.index("--repo") + 1] == "OTHER/THING"

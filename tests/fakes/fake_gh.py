@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 CALLS_FILENAME = "calls.jsonl"
+ENVIRONMENT_FILENAME = "environment.json"
 SCENARIO_FILENAME = "scenario.json"
 HOME_VARIABLE = "WORC_CONNECT_FAKE_GH_HOME"
 
@@ -33,6 +34,11 @@ def main(argv: list[str]) -> int:
     home = Path(os.environ[HOME_VARIABLE])
     with (home / CALLS_FILENAME).open("a", encoding="utf-8", newline="") as handle:
         handle.write(json.dumps(argv) + "\n")
+    # The environment as the connector handed it over, so "nothing is added for the child" is an
+    # assertion rather than a claim.
+    (home / ENVIRONMENT_FILENAME).write_text(
+        json.dumps(dict(os.environ)), encoding="utf-8", newline=""
+    )
 
     scenario = json.loads((home / SCENARIO_FILENAME).read_text(encoding="utf-8"))
     response = scenario.get("responses", {}).get(verb_of(argv))

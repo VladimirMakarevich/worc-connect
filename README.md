@@ -4,7 +4,7 @@
 
 `worc-connect` is the tracker connector for [wastech-orchestrator](https://github.com/VladimirMakarevich/wastech-orchestrator) (`worc`). It runs beside `worc watch` in the same clone, polls an issue tracker for one repository, turns each work item a maintainer has explicitly gated into a worc task through the ingress worc already has (`tasks/preparing/` + `worc promote`), and writes the outcome back to the tracker: a state label (`worc:queued` → `worc:in-progress` → `worc:pr-open` → `worc:done`), a comment naming the task, the pull-request link, and the close on merge. GitHub is the first tracker, driven through the operator's own `gh` login. The core knows no tracker API; every tracker is one adapter behind an optional dependency.
 
-**Status: gated issues become worc tasks.** The connector polls a real repository, applies the gate, writes the task file into worc's `tasks/preparing/` and promotes it with `worc promote` — exactly once per item, with a task id that is never reused. What it does **not** do yet is write anything back onto the issue: the state label, the comments, the pull-request link and the close on merge are the next phase. `worc-connect watch --once --dry-run` is still the safe first command and now prints the task id and branch it would allocate. The plan and the design record are in [docs/backlog/](docs/backlog/README.md).
+**Status: the loop is complete, and the first real run is the operator's.** A gated issue becomes a promoted worc task, the connector follows it through `worc list` and the pull request it opened, and the issue shows where it got to: `worc:queued` → `worc:in-progress` → `worc:pr-open` → `worc:done`, with a comment at each step that matters and the issue closed when the pull request is merged. Every path is covered against a fake `gh` and a fake `worc`; **the end-to-end run against a real repository has not been recorded yet** — it needs your own `gh` login and a `worc watch` beside the connector. `worc-connect watch --once --dry-run` is still the safe first command and prints the task id, the branch and the label it would apply. The plan and the design record are in [docs/backlog/](docs/backlog/README.md).
 
 ## What it will do
 
@@ -14,6 +14,20 @@
 4. When the PR is merged — by anyone, any way — the connector closes the issue.
 
 Triage by an agent (analyse, reproduce, write a failing test) is an **optional** mechanic behind `triage.enabled`, off by default: the item first becomes a worc _triage_ task, and deterministic code builds the implementation task from the report, or writes back `needs-info` / `duplicate` / `declined`.
+
+## What each label means
+
+Exactly one of these is on an issue at a time; re-applying the one it already has does nothing. The prefix is yours to change (`write_back.labels_prefix`). The connector creates whichever of them the repository is missing, just before it first needs one, and never edits one that already exists.
+
+| Label | What it means |
+| --- | --- |
+| `worc:queued` | The task file has been promoted into worc's queue. The comment names the task id. |
+| `worc:in-progress` | worc is running the task. |
+| `worc:pr-open` | The task opened a pull request; the comment carries its URL. From here the connector only watches — it never pushes to the branch. |
+| `worc:done` | The pull request was merged (and, unless you set `close_on_merge: false`, the issue was closed), or worc finished the task without opening one. |
+| `worc:failed` | worc ended the task without a pull request, or the pull request was closed unmerged. The comment names the status and points at `worc status <task-id>` on the host. |
+
+**On `worc:failed`, the recovery is yours and it happens on the host**, with `worc status <task-id>` and `worc rerun`. The connector never re-queues, edits or reruns a task on its own, and it never copies worc's logs or diffs onto the issue — a public issue is not the place for them. A pull request closed without a merge and then reopened returns the issue to `worc:pr-open` on the next tick; the connector recomputes every pull-request-derived state from the request itself, every time.
 
 ## Two things to know before you run it
 

@@ -127,11 +127,15 @@ Source: github item #142 by @reporter — https://github.com/OWNER/REPO/issues/1
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `labels_prefix` | `worc:` | Prefix of the connector-owned state labels (`worc:queued`, `worc:in-progress`, `worc:pr-open`, `worc:done`, `worc:failed`). Exactly one is present at a time. |
-| `comment` | `true` | Whether to comment when the task is queued, when its pull request exists, and when it ends without one. |
-| `close_on_merge` | `true` | Whether to close the item when its pull request is merged. |
+| `labels_prefix` | `worc:` | Prefix of the connector-owned state labels (`worc:queued`, `worc:in-progress`, `worc:pr-open`, `worc:done`, `worc:failed`). Exactly one is present at a time, and re-applying the one the item already shows does nothing. |
+| `comment` | `true` | Whether to comment when the task is queued, when its pull request exists, and when it ends without one. The closing message on a merge is not a comment and is not switched off by this. |
+| `close_on_merge` | `true` | Whether to close the item when its pull request is merged. With it off the item keeps its `worc:done` label and stays open for you to verify and close. |
 
-Comment bodies are connector-authored templates carrying the task id, a status name and URLs — never the item's own text, never a log line, never a diff.
+The item is the visible state machine, and the connector reads it back before every write: the state it shows decides whether anything is written at all. That is what makes a deleted `state.db` safe — the label says how far the item got — and what makes a tick with nothing new write nothing.
+
+The labels are **created on demand**: the connector asks the tracker which of them exist just before it publishes the first state of a run, creates the missing ones, and never edits one that is already there. `worc-connect init` does not create them, because `init` is offline and writes nothing but the connector's own home.
+
+Comment bodies are connector-authored templates carrying the task id, a status name and URLs — never the item's own text, never a log line, never a diff — and they reach the tracker as **files**, never as command arguments. The closing message on a merge is the one body that travels as an argument, because `gh issue close` offers no file form; it is a template too, carrying only the task id and the pull-request URL.
 
 ## `triage` — the optional analysis path
 

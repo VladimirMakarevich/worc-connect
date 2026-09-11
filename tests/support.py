@@ -12,7 +12,7 @@ import json
 import os
 import stat
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, metadata
 from pathlib import Path
@@ -29,7 +29,13 @@ from worc_connect.config import (
     WorcConfig,
     WriteBackConfig,
 )
-from worc_connect.core.items import PullRequest, WorkItem, WorkItemState
+from worc_connect.core.items import (
+    ItemState,
+    PullRequest,
+    PullRequestState,
+    WorkItem,
+    WorkItemState,
+)
 from worc_connect.home import ConnectorHome
 from worc_connect.trackers.base import TrackerUnavailable
 
@@ -169,10 +175,24 @@ class FakeGh:
         """The recorded calls whose subcommand is ``verb``."""
         return [call for call in self.calls if _verb_of(call) == verb]
 
+    @property
+    def environment(self) -> dict[str, str]:
+        """The environment the last call was given."""
+        return _recorded_environment(self.home)
+
     def _flush(self) -> None:
         (self.home / "scenario.json").write_text(
             json.dumps({"responses": self._responses}), encoding="utf-8", newline=""
         )
+
+
+def _recorded_environment(home: Path) -> dict[str, str]:
+    """The environment a fake executable recorded on its last call."""
+    path = home / "environment.json"
+    if not path.is_file():
+        return {}
+    loaded: dict[str, str] = json.loads(path.read_text(encoding="utf-8"))
+    return loaded
 
 
 def _verb_of(argv: list[str]) -> str:
@@ -211,6 +231,11 @@ class FakeWorc:
             return []
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
+    @property
+    def environment(self) -> dict[str, str]:
+        """The environment the last call was given."""
+        return _recorded_environment(self.home)
+
 
 @dataclass
 class FakeGit:
@@ -225,6 +250,21 @@ class FakeGit:
         if not path.is_file():
             return []
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def pull_request(
+    number: int = 201,
+    *,
+    state: PullRequestState = PullRequestState.OPEN,
+    merged_at: datetime | None = None,
+) -> PullRequest:
+    """A pull request as the core sees it, with everything a test does not care about filled in."""
+    return PullRequest(
+        number=number,
+        url=f"https://github.com/OWNER/REPO/pull/{number}",
+        state=state,
+        merged_at=merged_at,
+    )
 
 
 def install_launcher(bin_dir: Path, name: str, script: Path) -> None:
@@ -279,6 +319,9 @@ def connector_config(
     authors: tuple[str, ...] = (),
     allow_all: bool = False,
     task: TaskConfig | None = None,
+    labels_prefix: str = "worc:",
+    comment: bool = True,
+    close_on_merge: bool = True,
     tasks_dir: str = "tasks",
     max_task_bytes: int = 262_144,
     max_task_lines: int = 5_000,
@@ -300,7 +343,9 @@ def connector_config(
             max_task_lines=max_task_lines,
             max_line_bytes=max_line_bytes,
         ),
-        write_back=WriteBackConfig(labels_prefix="worc:", comment=True, close_on_merge=True),
+        write_back=WriteBackConfig(
+            labels_prefix=labels_prefix, comment=comment, close_on_merge=close_on_merge
+        ),
         triage=TriageConfig(enabled=False, flow="issue_triage"),
     )
 
@@ -312,12 +357,24 @@ class StubAdapter:
     Its existence is the proof the core asked for: a full tick drives this object through the same
     protocol the real adapter implements, so anything the loop learned about GitHub specifically
     would show up here as a missing method rather than as a passing test.
+
+    The write side records instead of sending, and reads the current state back off the item's own
+    labels exactly as a real adapter does — so "re-applying a state is a no-op" is asserted against
+    the same mechanism the product uses, not against a convenient shortcut.
     """
 
     items: list[WorkItem] = field(default_factory=list)
     failures: list[Exception] = field(default_factory=list)
     pull_request: PullRequest | None = None
+    pull_requests: dict[int, PullRequest] = field(default_factory=dict)
+    labels_prefix: str = "worc:"
     listed_since: list[datetime | None] = field(default_factory=list)
+    states: list[tuple[str, str, str | None]] = field(default_factory=list)
+    comments: list[tuple[str, str]] = field(default_factory=list)
+    closed: list[tuple[str, str]] = field(default_factory=list)
+    ensured: list[tuple[ItemState, ...]] = field(default_factory=list)
+    found_by_branch: list[str] = field(default_factory=list)
+    read_by_number: list[int] = field(default_factory=list)
 
     def list_items(self, since: datetime | None) -> list[WorkItem]:
         self.listed_since.append(since)
@@ -332,4 +389,45 @@ class StubAdapter:
         raise TrackerUnavailable(f"no item {identifier}")
 
     def find_pull_request(self, branch: str) -> PullRequest | None:
+        self.found_by_branch.append(branch)
         return self.pull_request
+
+    def get_pull_request(self, number: int) -> PullRequest:
+        self.read_by_number.append(number)
+        found = self.pull_requests.get(number) or self.pull_request
+        if found is None:
+            raise TrackerUnavailable(f"no pull request {number}")
+        return found
+
+    def current_state(self, item: WorkItem) -> ItemState | None:
+        for label in item.labels:
+            if label.startswith(self.labels_prefix):
+                name = label[len(self.labels_prefix) :]
+                if name in {str(state) for state in ItemState}:
+                    return ItemState(name)
+        return None
+
+    def set_state(self, identifier: str, state: ItemState, *, previous: ItemState | None) -> None:
+        self.states.append((identifier, str(state), None if previous is None else str(previous)))
+        self._relabel(identifier, state)
+
+    def comment(self, identifier: str, body_path: Path) -> None:
+        self.comments.append((identifier, body_path.read_text(encoding="utf-8")))
+
+    def close(self, identifier: str, message: str) -> None:
+        self.closed.append((identifier, message))
+        # A closed item leaves the open listing, exactly as it does on a real tracker — which is
+        # what keeps a merged, closed item from being re-triggered on the very next tick.
+        self.items = [item for item in self.items if item.identifier != identifier]
+
+    def ensure_labels(self, states: tuple[ItemState, ...]) -> None:
+        self.ensured.append(states)
+
+    def _relabel(self, identifier: str, state: ItemState) -> None:
+        """Put the new state on the stub's own copy of the item, as the tracker would."""
+        for index, item in enumerate(self.items):
+            if item.identifier == identifier:
+                kept = tuple(
+                    label for label in item.labels if not label.startswith(self.labels_prefix)
+                )
+                self.items[index] = replace(item, labels=(*kept, f"{self.labels_prefix}{state}"))

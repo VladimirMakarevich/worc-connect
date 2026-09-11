@@ -41,6 +41,7 @@ from worc_connect.core.state import (
     write_watermark,
 )
 from worc_connect.core.worc_cli import WorcCommand, WorcUnavailable
+from worc_connect.core.writeback import PHASE_STATES, WriteBack
 from worc_connect.home import ConnectorHome
 from worc_connect.trackers.base import TrackerAdapter, TrackerError
 
@@ -89,6 +90,7 @@ class PlannedAction:
     reason: str
     task_id: str | None = None
     branch: str | None = None
+    state: str | None = None
 
 
 @dataclass(frozen=True)
@@ -144,9 +146,13 @@ class Watcher:
         """
         now = self.now_fn()
         items = self.adapter.list_items(self._listing_floor())
-        reconciler = Reconciler(config=self.config, store=self.store, worc=self.worc)
+        reconciler = Reconciler(
+            config=self.config, store=self.store, worc=self.worc, adapter=self.adapter
+        )
+        write_back = WriteBack(config=self.config, adapter=self.adapter)
         actions = tuple(
-            self._plan(item, reconciler=reconciler, dry_run=dry_run, now=now) for item in items
+            self._plan(item, reconciler=reconciler, write_back=write_back, dry_run=dry_run, now=now)
+            for item in items
         )
         watermark = self._advance_watermark(items, dry_run=dry_run)
         report = TickReport(listed=len(items), actions=actions, watermark=watermark)
@@ -198,16 +204,22 @@ class Watcher:
         return None if watermark is None else watermark - WATERMARK_OVERLAP
 
     def _plan(
-        self, item: WorkItem, *, reconciler: Reconciler, dry_run: bool, now: datetime
+        self,
+        item: WorkItem,
+        *,
+        reconciler: Reconciler,
+        write_back: WriteBack,
+        dry_run: bool,
+        now: datetime,
     ) -> PlannedAction:
         """Decide — and, unless this is a dry run, carry out — what happens to one item."""
         verdict = gate.evaluate(item, self.config.gate)
-        row = self.store.latest_row(self.config.tracker, item.identifier)
+        row = self._known_row(item, reconciler=reconciler, dry_run=dry_run, now=now)
         if row is not None and not self._is_retrigger(row, admitted=verdict.admitted):
             return self._follow(
                 item,
                 row,
-                reconciler=reconciler,
+                work=(reconciler, write_back),
                 admitted=verdict.admitted,
                 dry_run=dry_run,
                 now=now,
@@ -216,14 +228,30 @@ class Watcher:
             _log(item, None, Action.SKIP, str(verdict.reason))
             return PlannedAction(item.identifier, item.url, Action.SKIP, str(verdict.reason))
         seq = 1 if row is None else row.seq + 1
+        branch = row.branch if row is not None and row.phase is Phase.PR_OPEN else None
         return self._take_on(
             item,
-            seq=seq,
+            attempt=(seq, branch),
             reason=str(verdict.reason),
-            reconciler=reconciler,
+            work=(reconciler, write_back),
             dry_run=dry_run,
             now=now,
         )
+
+    def _known_row(
+        self, item: WorkItem, *, reconciler: Reconciler, dry_run: bool, now: datetime
+    ) -> ItemRow | None:
+        """The row for ``item``, rebuilt from what the item itself shows when the cache has none.
+
+        The state label on the item is the visible state machine, so an item already carrying one
+        is an item the connector has handled — whatever became of its database. Rebuilding rather
+        than starting over is what stops a deleted cache from producing a second task.
+        """
+        row = self.store.latest_row(self.config.tracker, item.identifier)
+        if row is not None or dry_run:
+            return row
+        state = self.adapter.current_state(item)
+        return None if state is None else reconciler.rebuild(item, state, now=now)
 
     @staticmethod
     def _is_retrigger(row: ItemRow, *, admitted: bool) -> bool:
@@ -241,35 +269,43 @@ class Watcher:
         self,
         item: WorkItem,
         *,
-        seq: int,
+        attempt: tuple[int, str | None],
         reason: str,
-        reconciler: Reconciler,
+        work: tuple[Reconciler, WriteBack],
         dry_run: bool,
         now: datetime,
     ) -> PlannedAction:
-        """Record attempt ``seq`` at ``item`` and hand it over, or describe that for a dry run."""
-        row = self._new_row(item, seq=seq, now=now)
+        """Record one attempt at ``item`` and hand it over, or describe that for a dry run.
+
+        ``attempt`` is the sequence number and, when the previous attempt's pull request is still
+        open, the branch to continue: worc then appends to that request instead of opening a
+        second one for the same item.
+        """
+        seq, branch_ref = attempt
+        row = self._new_row(item, seq=seq, branch=branch_ref, now=now)
         if dry_run:
             # The builder is pure, so the plan can name the id and the branch the real tick would
             # allocate without anything being written anywhere.
-            draft = builder.build(item, self.config, seq=seq)
+            draft = builder.build(item, self.config, seq=seq, branch_ref=branch_ref)
             _log(item, draft.task_id, Action.STAGE, reason)
             return PlannedAction(
-                item.identifier, item.url, Action.STAGE, reason, draft.task_id, draft.branch
+                item.identifier,
+                item.url,
+                Action.STAGE,
+                reason,
+                draft.task_id,
+                draft.branch,
+                str(PHASE_STATES[Phase.QUEUED]),
             )
         self.store.save(row)
-        staged = reconciler.advance(row, item, now=now)
-        _log(item, staged.task_id, Action.STAGE, reason)
-        return PlannedAction(
-            item.identifier, item.url, Action.STAGE, reason, staged.task_id, staged.branch
-        )
+        return self._carry_out(item, row, work=work, action=Action.STAGE, reason=reason, now=now)
 
     def _follow(
         self,
         item: WorkItem,
         row: ItemRow,
         *,
-        reconciler: Reconciler,
+        work: tuple[Reconciler, WriteBack],
         admitted: bool,
         dry_run: bool,
         now: datetime,
@@ -283,23 +319,70 @@ class Watcher:
         if not admitted:
             _log(item, row.task_id, Action.FOLLOW, "gate-withdrawn")
             row = self._arm_retrigger(row, dry_run=dry_run, now=now)
-        if not dry_run:
-            row = reconciler.advance(row, item, now=now)
-        _log(item, row.task_id, Action.FOLLOW, str(row.phase))
+        if dry_run:
+            return self._planned(item, row, Action.FOLLOW, str(row.phase))
+        return self._carry_out(
+            item, row, work=work, action=Action.FOLLOW, reason=str(row.phase), now=now
+        )
+
+    def _carry_out(
+        self,
+        item: WorkItem,
+        row: ItemRow,
+        *,
+        work: tuple[Reconciler, WriteBack],
+        action: Action,
+        reason: str,
+        now: datetime,
+    ) -> PlannedAction:
+        """Advance the row against worc and the pull request, then show the result on the item.
+
+        The write-back runs last and only on what the reconcile concluded, so the item never shows
+        a state the connector has not actually reached.
+        """
+        reconciler, write_back = work
+        moved = reconciler.advance(row, item, now=now)
+        if write_back.publish(moved, item):
+            # Armed only once the item is actually closed: a close that never happened must not
+            # leave a row that the next tick reads as a fresh request.
+            moved = self._arm_retrigger(moved, dry_run=False, now=now)
+        _log(item, moved.task_id, action, reason if action is Action.STAGE else str(moved.phase))
+        return self._planned(
+            item, moved, action, reason if action is Action.STAGE else str(moved.phase)
+        )
+
+    @staticmethod
+    def _planned(item: WorkItem, row: ItemRow, action: Action, reason: str) -> PlannedAction:
+        """One item's outcome, carrying the identifiers and the state it is shown in."""
+        state = PHASE_STATES.get(row.phase)
         return PlannedAction(
-            item.identifier, item.url, Action.FOLLOW, str(row.phase), row.task_id, row.branch
+            item.identifier,
+            item.url,
+            action,
+            reason,
+            row.task_id,
+            row.branch,
+            None if state is None else str(state),
         )
 
     def _arm_retrigger(self, row: ItemRow, *, dry_run: bool, now: datetime) -> ItemRow:
-        """Record that the trigger was withdrawn, so re-applying it later starts a new attempt."""
+        """Record that a later trigger on this item would be a new request rather than this one.
+
+        Two things arm it, and both are events the connector observed rather than inferred: the
+        trigger withdrawn, and the item closed because its pull request merged.
+        """
         if row.retrigger_armed or dry_run:
             return row
         armed = replace(row, retrigger_armed=True, updated_at=now)
         self.store.save(armed)
         return armed
 
-    def _new_row(self, item: WorkItem, *, seq: int, now: datetime) -> ItemRow:
-        """The row attempt ``seq`` at an admitted item starts from."""
+    def _new_row(self, item: WorkItem, *, seq: int, branch: str | None, now: datetime) -> ItemRow:
+        """The row an attempt at an admitted item starts from.
+
+        A branch already on a brand-new row is not a leftover: it is the previous attempt's, and it
+        tells the builder to continue that branch and its pull request.
+        """
         return ItemRow(
             tracker=self.config.tracker,
             item_id=item.identifier,
@@ -307,6 +390,7 @@ class Watcher:
             phase=Phase.GATED,
             created_at=now,
             updated_at=now,
+            branch=branch,
             item_updated_at=item.updated_at,
         )
 

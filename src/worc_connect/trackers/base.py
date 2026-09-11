@@ -15,9 +15,10 @@ rather than a source of duplicate or half-finished tasks.
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from worc_connect.core.items import PullRequest, WorkItem
+from worc_connect.core.items import ItemState, PullRequest, WorkItem
 
 
 class TrackerError(Exception):
@@ -80,6 +81,49 @@ class TrackerAdapter(Protocol):
         """
         ...
 
+    def get_pull_request(self, number: int) -> PullRequest:
+        """One pull request by number, whatever has happened to it since.
+
+        This is what makes the follow-through survive the owner: more commits, a new title, a
+        squash merge, a deleted branch and a reopening all leave the number alone. Raises
+        :class:`TrackerUnavailable` when the request cannot be read.
+        """
+        ...
+
+    def current_state(self, item: WorkItem) -> ItemState | None:
+        """The connector-owned state ``item`` currently shows, or ``None`` when it shows none.
+
+        Read from the item itself rather than from the connector's cache, because the item is the
+        visible state machine: it is what a human sees, what a restarted connector rebuilds from,
+        and what makes re-applying a state a no-op instead of a second notification.
+        """
+        ...
+
+    def set_state(self, identifier: str, state: ItemState, *, previous: ItemState | None) -> None:
+        """Put ``state`` on the item and take ``previous`` off, leaving exactly one in place."""
+        ...
+
+    def comment(self, identifier: str, body_path: Path) -> None:
+        """Post the comment whose body is the file at ``body_path``.
+
+        The body travels as a **file** on purpose. Nothing an item wrote is ever in it — every
+        comment is a connector-authored template carrying a task id, a status name and URLs — and a
+        body file is what keeps that true by construction rather than by review.
+        """
+        ...
+
+    def close(self, identifier: str, message: str) -> None:
+        """Close the item with ``message``, which is a connector-authored template."""
+        ...
+
+    def ensure_labels(self, states: tuple[ItemState, ...]) -> None:
+        """Create whichever of the connector's state labels the tracker does not have yet.
+
+        Called before the first state is written rather than at ``init``, which is an offline
+        command that touches nothing but the connector's own home.
+        """
+        ...
+
 
 class AdapterFactory(Protocol):
     """What an entry point in the ``worc_connect.trackers`` group must resolve to.
@@ -89,6 +133,11 @@ class AdapterFactory(Protocol):
     core owns — which is also why ``import-linter`` forbids an adapter from importing it.
     """
 
-    def __call__(self, *, repo: str) -> TrackerAdapter:
-        """Build an adapter bound to the repository named by ``repo``."""
+    def __call__(self, *, repo: str, labels_prefix: str) -> TrackerAdapter:
+        """Build an adapter bound to ``repo``, publishing state under ``labels_prefix``.
+
+        The prefix is configuration the operator owns, and turning a state into the tracker's own
+        vocabulary is the adapter's job, so it is handed over at construction: the core names a
+        state, never a label.
+        """
         ...

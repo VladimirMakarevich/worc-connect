@@ -3,27 +3,36 @@ root_package = worc_connect
 
 # The architectural invariant of this package, machine-checked: the core works on a normalized
 # WorkItem and the TrackerAdapter protocol only, and never learns a tracker's CLI or API. Adapters are
-# resolved through the `worc_connect.trackers` entry-point group by the composition root (cli.py).
+# resolved through the `worc_connect.trackers` entry-point group by the composition root (cli.py), so
+# the registry that performs that lookup is out of bounds for the core too — a core module that could
+# reach it could reach an adapter.
 [importlinter:contract:core-not-concrete-adapters]
-name = The core never imports a concrete tracker adapter
+name = The core imports no tracker package except the adapter contract
 type = forbidden
 source_modules =
     worc_connect.core
 forbidden_modules =
-    worc_connect.trackers.github
+    worc_connect.trackers
+ignore_imports =
+    worc_connect.core.* -> worc_connect.trackers.base
 
 # Adapters are leaves: they know one tracker and nothing about the loop, the configuration file or the
-# CLI. The item model (`worc_connect.core.items`) is the one core module an adapter may import; add it
-# here as `ignore_imports = worc_connect.trackers.** -> worc_connect.core.items` together with the
-# `worc_connect.core` line once that module exists.
+# CLI. The normalized item model is the one core module the tracker layer may import — it is the
+# vocabulary the protocol is written in, and an adapter that could not import it could not return a
+# WorkItem. Both edges to it are named: the adapter's own, and the one the protocol in `base` needs
+# (without which every adapter would import `core.items` indirectly through the contract it fulfils).
 [importlinter:contract:adapters-are-leaf]
-name = A tracker adapter does not depend on the CLI or the configuration
+name = A tracker adapter depends on nothing but the item model
 type = forbidden
 source_modules =
     worc_connect.trackers.github
 forbidden_modules =
     worc_connect.cli
     worc_connect.config
+    worc_connect.core
+ignore_imports =
+    worc_connect.trackers.github.* -> worc_connect.core.items
+    worc_connect.trackers.base -> worc_connect.core.items
 
 [importlinter:contract:core-below-cli]
 name = The core does not depend on the CLI

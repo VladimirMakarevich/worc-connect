@@ -31,11 +31,14 @@ repos:
         additional_dependencies: ["ruff==0.16.7"]
         types_or: [python, pyi]
         pass_filenames: false
+      # Stubs are declared here as well as in the `dev` extra: this environment never installs the
+      # package, so a third-party type stub it needs has to arrive as its own pinned dependency or
+      # strict mode fails on the untyped import. Bump both spellings together.
       - id: mypy
         name: mypy src
         entry: mypy src
         language: python
-        additional_dependencies: ["mypy==2.3.1"]
+        additional_dependencies: ["mypy==2.3.1", "types-PyYAML==6.0.12.20260906"]
         pass_filenames: false
         files: ^src/.*\.py$
       - id: import-linter
@@ -85,10 +88,12 @@ repos:
         additional_dependencies: ["deptry==0.25.1"]
         pass_filenames: false
         stages: [pre-push]
+      # PyYAML joins the runners here because the suite imports it (the configuration fixtures write
+      # real YAML). Everything else the tests need is stdlib or the working tree itself.
       - id: pytest
         name: pytest
         entry: pytest -q
         language: python
-        additional_dependencies: ["pytest==9.1.1", "pytest-xdist==3.8.0"]
+        additional_dependencies: ["pytest==9.1.1", "pytest-xdist==3.8.0", "PyYAML==6.0.3"]
         pass_filenames: false
         stages: [pre-push]

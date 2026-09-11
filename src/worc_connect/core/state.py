@@ -20,7 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final, Self
 
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 4
 
 _META_SCHEMA_VERSION: Final = "schema_version"
 
@@ -32,20 +32,24 @@ META_LAST_TICK_RESULT: Final = "last_tick_result"
 
 _SCHEMA: Final = """
 CREATE TABLE items (
-    tracker         TEXT    NOT NULL,
-    item_id         TEXT    NOT NULL,
-    seq             INTEGER NOT NULL,
-    task_id         TEXT    UNIQUE,
-    branch          TEXT,
-    phase           TEXT    NOT NULL,
-    item_updated_at TEXT,
-    last_status     TEXT,
-    pr_number       INTEGER,
-    pr_url          TEXT,
-    pr_merged       INTEGER NOT NULL DEFAULT 0,
-    retrigger_armed INTEGER NOT NULL DEFAULT 0,
-    created_at      TEXT    NOT NULL,
-    updated_at      TEXT    NOT NULL,
+    tracker           TEXT    NOT NULL,
+    item_id           TEXT    NOT NULL,
+    seq               INTEGER NOT NULL,
+    task_id           TEXT    UNIQUE,
+    branch            TEXT,
+    phase             TEXT    NOT NULL,
+    item_updated_at   TEXT,
+    last_status       TEXT,
+    validation_reason TEXT,
+    stage             TEXT    NOT NULL,
+    research_task_id  TEXT,
+    research_note     TEXT,
+    pr_number         INTEGER,
+    pr_url            TEXT,
+    pr_merged         INTEGER NOT NULL DEFAULT 0,
+    retrigger_armed   INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT    NOT NULL,
+    updated_at        TEXT    NOT NULL,
     PRIMARY KEY (tracker, item_id, seq)
 );
 CREATE TABLE meta (
@@ -59,12 +63,27 @@ class StateError(Exception):
     """The store was asked for something it cannot do — a write on a read-only store, say."""
 
 
+class Stage(StrEnum):
+    """Which of an item's two possible tasks this row is following.
+
+    An item reaches an implementation task either directly or through a triage task first, and the
+    two are followed differently: a triage task publishes nothing, so it ends at a report the
+    connector reads, while an implementation task ends at a pull request the connector watches.
+    One row per task keeps each id and each outcome its own, which is what the "never reuse an id"
+    rule needs.
+    """
+
+    RESEARCH = "research"
+    IMPLEMENTATION = "implementation"
+
+
 class Phase(StrEnum):
     """Where the connector has got to with one item, from first sighting to a terminal outcome.
 
     Distinct from the tracker-facing :class:`~worc_connect.core.items.ItemState`: a phase is the
     connector's own bookkeeping and includes steps an operator never sees a label for, such as a
-    task file staged but not yet promoted.
+    task file staged but not yet promoted, and a triage task whose report has been read and acted
+    on — the item's visible state then belongs to the implementation task that report produced.
     """
 
     GATED = "gated"
@@ -74,9 +93,14 @@ class Phase(StrEnum):
     PR_OPEN = "pr-open"
     DONE = "done"
     FAILED = "failed"
+    RESEARCHED = "researched"
+    NEEDS_INFO = "needs-info"
+    DECLINED = "declined"
 
 
-TERMINAL_PHASES: Final = frozenset({Phase.DONE, Phase.FAILED})
+TERMINAL_PHASES: Final = frozenset(
+    {Phase.DONE, Phase.FAILED, Phase.RESEARCHED, Phase.NEEDS_INFO, Phase.DECLINED}
+)
 
 
 @dataclass(frozen=True)
@@ -93,6 +117,17 @@ class ItemRow:
     branch: str | None = None
     item_updated_at: datetime | None = None
     last_status: str | None = None
+    # The reason worc's validation gate refused the task, as worc published it. Held so the item
+    # can be told why, because a refused task has no worc row of its own to point anybody at.
+    validation_reason: str | None = None
+    stage: Stage = Stage.IMPLEMENTATION
+    # The triage task whose report this implementation task was built from, so the builder can read
+    # that report back by name instead of inferring which task it belonged to from the sequence.
+    research_task_id: str | None = None
+    # What the triage report said, for the outcome the item is shown. Separate from
+    # `validation_reason` because their provenance differs: that one is worc's own vocabulary,
+    # this one is prose an agent wrote.
+    research_note: str | None = None
     pr_number: int | None = None
     pr_url: str | None = None
     pr_merged: bool = False
@@ -136,6 +171,10 @@ def _row(record: sqlite3.Row) -> ItemRow:
         branch=record["branch"],
         item_updated_at=_parse(record["item_updated_at"]),
         last_status=record["last_status"],
+        validation_reason=record["validation_reason"],
+        stage=Stage(record["stage"]),
+        research_task_id=record["research_task_id"],
+        research_note=record["research_note"],
         pr_number=record["pr_number"],
         pr_url=record["pr_url"],
         pr_merged=bool(record["pr_merged"]),
@@ -215,14 +254,19 @@ class StateStore:
             """
             INSERT INTO items (
                 tracker, item_id, seq, task_id, branch, phase, item_updated_at, last_status,
+                validation_reason, stage, research_task_id, research_note,
                 pr_number, pr_url, pr_merged, retrigger_armed, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(tracker, item_id, seq) DO UPDATE SET
                 task_id = excluded.task_id,
                 branch = excluded.branch,
                 phase = excluded.phase,
                 item_updated_at = excluded.item_updated_at,
                 last_status = excluded.last_status,
+                validation_reason = excluded.validation_reason,
+                stage = excluded.stage,
+                research_task_id = excluded.research_task_id,
+                research_note = excluded.research_note,
                 pr_number = excluded.pr_number,
                 pr_url = excluded.pr_url,
                 pr_merged = excluded.pr_merged,
@@ -238,6 +282,10 @@ class StateStore:
                 str(row.phase),
                 _iso(row.item_updated_at),
                 row.last_status,
+                row.validation_reason,
+                str(row.stage),
+                row.research_task_id,
+                row.research_note,
                 row.pr_number,
                 row.pr_url,
                 int(row.pr_merged),

@@ -24,8 +24,9 @@ import yaml
 from worc_connect.config import (
     ConnectorConfig,
     GateConfig,
+    ResearchConfig,
+    ResearchMode,
     TaskConfig,
-    TriageConfig,
     WorcConfig,
     WriteBackConfig,
 )
@@ -36,6 +37,8 @@ from worc_connect.core.items import (
     WorkItem,
     WorkItemState,
 )
+from worc_connect.core.worc_cli import REJECTED_STATUS
+from worc_connect.core.worc_version import MINIMUM_VERSION as MINIMUM_WORC_VERSION
 from worc_connect.home import ConnectorHome
 from worc_connect.trackers.base import TrackerUnavailable
 
@@ -83,6 +86,39 @@ requires_worc = pytest.mark.skipif(
 )
 
 
+def _worc_allows_references() -> bool:
+    """Whether the installed worc's task grammar knows the ``references:`` key at all."""
+    if not _worc_is_importable():
+        return False
+    from wastech_orchestrator.task.model import ALLOWED_TASK_KEYS
+
+    return "references" in ALLOWED_TASK_KEYS
+
+
+def _worc_knows_report_dir() -> bool:
+    """Whether the installed worc's flow schema carries the ``report_dir`` key the flow declares."""
+    if not _worc_is_importable():
+        return False
+    from dataclasses import fields
+
+    from wastech_orchestrator.core.flow.schema import FlowDoc
+
+    return any(field.name == "report_dir" for field in fields(FlowDoc))
+
+
+# The contract is pinned in `requirements-worc.txt`, but an older worc installed by hand would make
+# these suites judge what the connector produces against rules it has never heard of. That is a skip
+# with a reason, not a failure — the same shape as `requires_worc` one line up.
+requires_worc_references = pytest.mark.skipif(
+    not _worc_allows_references(),
+    reason="the installed worc predates `references:`: reinstall from requirements-worc.txt",
+)
+requires_worc_report_dir = pytest.mark.skipif(
+    not _worc_knows_report_dir(),
+    reason="the installed worc predates `flow.report_dir`: reinstall from requirements-worc.txt",
+)
+
+
 def base_config(*, repo: str = "OWNER/REPO") -> dict[str, Any]:
     """A configuration the loader accepts, as a mapping tests edit before writing it out."""
     return {
@@ -94,7 +130,7 @@ def base_config(*, repo: str = "OWNER/REPO") -> dict[str, Any]:
         "task": {"branch_prefix": "worc", "id_prefix": "gh"},
         "worc": {"command": "worc", "repo_path": ".", "tasks_dir": "tasks"},
         "write_back": {"labels_prefix": "worc:", "comment": True, "close_on_merge": True},
-        "triage": {"enabled": False, "flow": "issue_triage"},
+        "research": {"mode": "off", "flow": "issue_triage"},
     }
 
 
@@ -202,14 +238,21 @@ def _verb_of(argv: list[str]) -> str:
 
 @dataclass
 class FakeWorc:
-    """A handle on the fake worc: what it will answer, and what it was asked."""
+    """A handle on the fake worc: what it will answer, and what it was asked.
+
+    It answers the version handshake as a worc that ships the contract, because that is the worc
+    the connector documents as its minimum; a test that wants the older behaviour says so with
+    ``configure(version=...)``.
+    """
 
     home: Path
     bin_dir: Path
-    _scenario: dict[str, Any] = field(default_factory=lambda: {"tasks_dir": "tasks"})
+    _scenario: dict[str, Any] = field(
+        default_factory=lambda: {"tasks_dir": "tasks", "version": MINIMUM_WORC_VERSION}
+    )
 
     def configure(self, **scenario: Any) -> None:
-        """Set or replace scenario values (``tasks_dir``, ``entries``, ``promote``, ``list``)."""
+        """Set or replace scenario values (``tasks_dir``, ``version``, ``entries``, …)."""
         self._scenario.update(scenario)
         (self.home / "scenario.json").write_text(
             json.dumps(self._scenario), encoding="utf-8", newline=""
@@ -218,10 +261,7 @@ class FakeWorc:
     def entries(self, **statuses: str) -> None:
         """Script ``worc list --format json`` as one entry per ``task_id=status`` pair."""
         self.configure(
-            entries=[
-                {"task_id": task_id, "status": status, "title": None, "branch": None}
-                for task_id, status in statuses.items()
-            ]
+            entries=[listed_task(task_id, status) for task_id, status in statuses.items()]
         )
 
     @property
@@ -251,6 +291,63 @@ class FakeGit:
         if not path.is_file():
             return []
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def listed_task(
+    task_id: str,
+    status: str,
+    *,
+    pr_url: str | None = None,
+    validation_reason: str | None = None,
+) -> dict[str, Any]:
+    """One entry in the shape `worc list --format json --all` prints it in.
+
+    Every key worc publishes is present, `null` where worc would write null, so a test that wants
+    the *older* listing (no `pr_url`, no `rejected` section) builds its entries by hand and the
+    difference between the two contracts stays visible in the test that cares about it.
+    """
+    entry: dict[str, Any] = {
+        "task_id": task_id,
+        "status": status,
+        "title": None,
+        "branch": None,
+        "pr_url": pr_url,
+    }
+    if status == REJECTED_STATUS:
+        entry |= {"validation_reason": validation_reason, "rejected_at": "2026-09-11T10:00:00Z"}
+    return entry
+
+
+def report_text(
+    verdict: object,
+    *,
+    reason: str,
+    duplicate_of: str | None = None,
+    acceptance_criteria: tuple[str, ...] = (),
+    failing_test: dict[str, str] | None = None,
+) -> str:
+    """A triage report in the shape the shipped flow instructs the report node to produce.
+
+    Built rather than written out per test so a change to the block's shape is a change in one
+    place — and so the fixture cannot accidentally stop being the shape the prompt asks for.
+    """
+    block: dict[str, Any] = {"verdict": str(verdict), "reason": reason}
+    if duplicate_of is not None:
+        block["duplicate_of"] = duplicate_of
+    if acceptance_criteria:
+        block["acceptance_criteria"] = list(acceptance_criteria)
+    if failing_test is not None:
+        block["failing_test"] = failing_test
+    rendered = yaml.safe_dump(block, sort_keys=False, allow_unicode=True)
+    return f"# Triage\n\nWhat the analysis found.\n\n```worc-connect-triage\n{rendered}```\n"
+
+
+def write_report(home: ConnectorHome, task_id: str, text: str) -> Path:
+    """Put ``text`` where the triage flow's declared report directory would have left it."""
+    path = home.triage_path / task_id / "report.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8", newline="")
+    return path
 
 
 def pull_request(
@@ -327,6 +424,8 @@ def connector_config(
     max_task_bytes: int = 262_144,
     max_task_lines: int = 5_000,
     max_line_bytes: int = 8_192,
+    research: ResearchMode = ResearchMode.OFF,
+    research_flow: str = "issue_triage",
 ) -> ConnectorConfig:
     """A validated configuration built directly, for tests that are not about the loader."""
     return ConnectorConfig(
@@ -347,7 +446,7 @@ def connector_config(
         write_back=WriteBackConfig(
             labels_prefix=labels_prefix, comment=comment, close_on_merge=close_on_merge
         ),
-        triage=TriageConfig(enabled=False, flow="issue_triage"),
+        research=ResearchConfig(mode=research, flow=research_flow),
     )
 
 
@@ -375,7 +474,11 @@ class StubAdapter:
     closed: list[tuple[str, str]] = field(default_factory=list)
     ensured: list[tuple[ItemState, ...]] = field(default_factory=list)
     found_by_branch: list[str] = field(default_factory=list)
+    found_by_url: list[str] = field(default_factory=list)
     read_by_number: list[int] = field(default_factory=list)
+    # The tracker's own closing keyword; `None` stands for an adapter whose tracker has none, which
+    # is a case the builder has to handle without a per-tracker branch.
+    closing_keyword: str | None = "Fixes"
 
     def list_items(self, since: datetime | None) -> list[WorkItem]:
         self.listed_since.append(since)
@@ -389,9 +492,17 @@ class StubAdapter:
                 return item
         raise TrackerUnavailable(f"no item {identifier}")
 
-    def find_pull_request(self, branch: str) -> PullRequest | None:
+    def find_pull_request(self, branch: str, *, url: str | None = None) -> PullRequest | None:
+        if url is not None:
+            self.found_by_url.append(url)
+            return self.pull_requests.get(self._number_in(url)) or self.pull_request
         self.found_by_branch.append(branch)
         return self.pull_request
+
+    def closing_reference(self, item: WorkItem) -> str | None:
+        return (
+            None if self.closing_keyword is None else f"{self.closing_keyword} #{item.identifier}"
+        )
 
     def get_pull_request(self, number: int) -> PullRequest:
         self.read_by_number.append(number)
@@ -423,6 +534,10 @@ class StubAdapter:
 
     def ensure_labels(self, states: tuple[ItemState, ...]) -> None:
         self.ensured.append(states)
+
+    @staticmethod
+    def _number_in(url: str) -> int:
+        return int(url.rstrip("/").rsplit("/", 1)[-1])
 
     def _relabel(self, identifier: str, state: ItemState) -> None:
         """Put the new state on the stub's own copy of the item, as the tracker would."""

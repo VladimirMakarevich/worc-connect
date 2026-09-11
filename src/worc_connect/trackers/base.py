@@ -72,12 +72,14 @@ class TrackerAdapter(Protocol):
         """
         ...
 
-    def find_pull_request(self, branch: str) -> PullRequest | None:
-        """The pull request opened for ``branch``, or ``None`` while there is none.
+    def find_pull_request(self, branch: str, *, url: str | None = None) -> PullRequest | None:
+        """The pull request the task opened, or ``None`` while there is none.
 
-        Searched by the branch the connector itself named, in any state, so that a request already
-        merged or closed is found too. Once found, the caller remembers its number and reads it by
-        number from then on.
+        ``url`` is worc's own record of that request, where worc published one. It is exact and it
+        outlives the head — a squash merge that deleted the branch leaves a branch query nothing to
+        find — so an implementation resolves it first and falls back to searching by the branch the
+        connector itself named, in any state, so that a request already merged or closed is found
+        too. Once found, the caller remembers its number and reads it by number from then on.
         """
         ...
 
@@ -121,6 +123,16 @@ class TrackerAdapter(Protocol):
 
         Called before the first state is written rather than at ``init``, which is an offline
         command that touches nothing but the connector's own home.
+        """
+        ...
+
+    def closing_reference(self, item: WorkItem) -> str | None:
+        """The line that makes this tracker close ``item`` when the pull request merges.
+
+        It travels in the task's ``references``, which worc appends verbatim to the pull-request
+        body without interpreting it: the keyword is the adapter's knowledge — GitHub's ``Fixes
+        #<n>``, another host's own spelling — and worc learns none of them. An adapter whose
+        tracker has no such keyword returns ``None``, and the task then carries no reference.
         """
         ...
 

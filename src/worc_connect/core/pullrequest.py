@@ -32,13 +32,18 @@ class PullRequestWatcher:
 
     adapter: TrackerAdapter
 
-    def advance(self, row: ItemRow, *, now: datetime) -> ItemRow:
-        """Recompute ``row``'s phase from the pull request it is waiting on, if there is one."""
+    def advance(self, row: ItemRow, *, url: str | None = None, now: datetime) -> ItemRow:
+        """Recompute ``row``'s phase from the pull request it is waiting on, if there is one.
+
+        ``url`` is worc's own record of the request this task opened, for the one tick that still
+        has to discover it: it names the request even when the head branch is already gone, which
+        is exactly the state a squash merge leaves behind.
+        """
         if row.pr_number is not None:
             return _from_live(row, self.adapter.get_pull_request(row.pr_number), now=now)
-        if not _is_looking(row) or row.branch is None:
+        if not needs_discovery(row) or row.branch is None:
             return row
-        found = self.adapter.find_pull_request(row.branch)
+        found = self.adapter.find_pull_request(row.branch, url=url)
         if found is None:
             # worc has finished and opened nothing. The branch query is answered from the pull
             # requests themselves rather than from a search index, so "none" is an answer and not a
@@ -54,14 +59,17 @@ class PullRequestWatcher:
         return _from_live(stored, found, now=now)
 
 
-def _is_looking(row: ItemRow) -> bool:
-    """Whether this row should be searching for its pull request.
+def needs_discovery(row: ItemRow) -> bool:
+    """Whether this row still has to find the pull request its task opened.
 
-    Either worc has finished the task — which is when the request exists, since worc reports a task
-    done from the moment it published — or the row was rebuilt from an item already showing that a
-    request is open, and has to find the number it lost with the database.
+    Public because the caller decides, on this answer, whether to ask worc for the URL it recorded
+    — and a row that is not looking must not cost a worc launch to establish that.
+
+    A row is looking when worc has finished the task — which is when the request exists, since worc
+    reports a task done from the moment it published — or when it was rebuilt from an item already
+    showing that a request is open and has to find the number it lost with the database.
     """
-    return _is_finished(row) or row.phase is Phase.PR_OPEN
+    return row.pr_number is None and (_is_finished(row) or row.phase is Phase.PR_OPEN)
 
 
 def _is_finished(row: ItemRow) -> bool:

@@ -215,6 +215,59 @@ def test_an_unknown_pull_request_state_reads_as_closed(fake_gh: FakeGh) -> None:
     assert found.state is PullRequestState.CLOSED
 
 
+def test_the_url_worc_recorded_is_read_by_number_and_the_branch_is_never_searched(
+    fake_gh: FakeGh,
+) -> None:
+    fake_gh.respond(
+        "pr view",
+        payload={
+            "number": 201,
+            "url": "https://github.com/OWNER/REPO/pull/201",
+            "state": "MERGED",
+            "mergedAt": "2026-09-11T09:00:00Z",
+        },
+    )
+
+    found = adapter().find_pull_request(
+        "worc/gh-142-signup", url="https://github.com/OWNER/REPO/pull/201"
+    )
+
+    assert found is not None and found.number == 201
+    assert fake_gh.calls_for("pr list") == []
+    # The URL itself never reaches the argument list: the number is read out of it first.
+    argv = fake_gh.calls_for("pr view")[0]
+    assert "201" in argv
+    assert not any(argument.startswith("http") for argument in argv)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/OWNER/REPO/issues/201",
+        "not a url",
+        "https://github.com/OWNER/REPO/pull/",
+    ],
+)
+def test_a_url_this_adapter_does_not_recognise_falls_back_to_the_branch(
+    fake_gh: FakeGh, url: str
+) -> None:
+    fake_gh.respond("pr list", payload=[])
+
+    assert adapter().find_pull_request("worc/gh-142-signup", url=url) is None
+    assert fake_gh.calls_for("pr list")
+
+
+def test_the_closing_reference_names_the_issue_and_nothing_the_item_wrote() -> None:
+    item = work_item(title="; rm -rf / `whoami`", body="$(id)")
+
+    assert adapter().closing_reference(item) == "Fixes #142"
+
+
+def test_a_closing_reference_is_refused_for_an_identifier_that_is_not_a_number() -> None:
+    with pytest.raises(TrackerUnavailable):
+        adapter().closing_reference(work_item("AB-7"))
+
+
 def test_an_authentication_failure_is_reported_as_such(fake_gh: FakeGh) -> None:
     fake_gh.respond(
         "issue list",

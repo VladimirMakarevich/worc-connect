@@ -62,7 +62,8 @@ def test_a_gated_item_becomes_a_promoted_worc_task(
     watcher(home, adapter, store).tick(dry_run=False)
 
     assert clone_files(home.clone_path) == {"tasks/pending/gh-142.md"}
-    assert fake_worc.calls == [["promote", "gh-142"]]
+    # The version handshake and the promote: one read that writes nothing and the one write.
+    assert fake_worc.calls == [["--version"], ["promote", "gh-142"]]
     assert refuse_git.calls == []
     row = store.latest_row("github", "142")
     assert row is not None
@@ -96,7 +97,8 @@ def test_a_crash_before_promote_leaves_one_file_and_one_row(
     loop.tick(dry_run=False)
 
     assert clone_files(clone) == {"tasks/pending/gh-142.md"}
-    assert fake_worc.calls == [["promote", "gh-142"], ["promote", "gh-142"]]
+    # The handshake is asked once per process, however many ticks that process runs.
+    assert fake_worc.calls == [["--version"], ["promote", "gh-142"], ["promote", "gh-142"]]
     assert len(store.rows()) == 1
     queued = store.latest_row("github", "142")
     assert queued is not None and queued.phase is Phase.QUEUED

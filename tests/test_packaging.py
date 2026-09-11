@@ -65,3 +65,19 @@ def test_the_runtime_dependency_set_is_the_configuration_parser_alone() -> None:
     runtime = [line.split(";")[0].strip().casefold() for line in required if "extra ==" not in line]
 
     assert runtime == ["pyyaml>=6.0"]
+
+
+def test_the_triage_flow_and_its_prompts_ship_inside_the_distribution() -> None:
+    # Read through `importlib.resources`, the way the installer reads them: a file present in the
+    # working tree but missing from the wheel would make `install-flow` fail on a real install and
+    # pass here.
+    from worc_connect import flows
+
+    shipped = flows.packaged()
+
+    assert f"{flows.PACKAGED_FLOW}.yaml" in shipped
+    assert {name for name in shipped if name.endswith(".md")} == {
+        f"{flows.PACKAGED_FLOW}/{role}"
+        for role in ("scope.md", "analysis.md", "reproduction.md", "verifier.md", "report.md")
+    }
+    assert all(content for content in shipped.values())

@@ -17,11 +17,11 @@ The critical path is 03 → 04 → 05 → a real end-to-end run. The biggest ris
 | 03 | [Connector skeleton: core, GitHub adapter (read side), gate, state, dry run](03-connector-skeleton.md) | connector | FR-C1, C2, C8, C13, C14: `watch --once --dry-run` lists what it would do against a real repository | — | ☑ code complete |
 | 04 | [Task builder and handoff](04-connector-builder-handoff.md) | connector | FR-C3, C4, C5, C6, C7: a gated issue becomes a promoted worc task, idempotently | 03 | ☑ code complete |
 | 05 | [Write-back and reconciliation](05-connector-writeback.md) | connector | FR-C9, C10, C11, C12: labels, comments, PR link, close on merge, failure path; first real end-to-end run | 04 | ☑ code complete |
-| 06 | [Adopt the worc contract](06-connector-adopt-contract.md) | connector | `Fixes #<n>` via `references:`, `pr_url` and the rejection reason from `worc list --all`, `close_on_merge` becomes a real choice | 01, 02, 05 | ☐ |
-| 07 | [Optional triage](07-connector-triage.md) | connector (+ flow data) | FR-C15: `triage.enabled`, `install-flow`, the two-step path, the report read from `.worc-connect/triage/<id>/` | 04, 05, 08 | ☐ |
+| 06 | [Adopt the worc contract](06-connector-adopt-contract.md) | connector | `Fixes #<n>` via `references:`, `pr_url` and the rejection reason from `worc list --all`, `close_on_merge` becomes a real choice | 01, 02, 05 | ☑ code complete |
+| 07 | [Optional triage](07-connector-triage.md) | connector (+ flow data) | FR-C15: `research.mode`, `install-flow`, the two-step path, the report read from `.worc-connect/triage/<id>/` | 04, 05, 08 | ☐ |
 | 08 | Configurable report directory, private policy included _(worc repository, tracked there)_ | worc (orchestrator repo) | FR-W4: `flow.report_dir`, `{report_dir}` prompt variable, path validation, the private-policy allowance, `deep_research` prompts switched to the variable | — | ☑ merged into worc `dev` |
 
-Phases 01, 02 and 08 ran in parallel with 03 and are done; what remains is the connector's own chain, 04 → 05 → 06 → 07.
+Phases 01, 02 and 08 ran in parallel with 03 and are done; the connector's own chain 03 → 04 → 05 → 06 → 07 is code complete, and what remains of it is the two real runs its acceptance criteria name — one with `write_back.close_on_merge: false`, one with `research.mode: worc`.
 
 ## Cross-cutting
 
@@ -41,6 +41,6 @@ Phases 01, 02 and 08 ran in parallel with 03 and are done; what remains is the c
 | Title sanitizer misses a token worc rejects → silent quarantine | low | AC-4 runs the generated file through worc's real gate; AC-E3 turns a quarantine into a visible `worc:failed` comment |
 | Two processes race on `tasks/preparing/` | low | atomic temp+`os.replace` write; `promote` refuses to overwrite; the audit commit stages only the lifecycle file |
 | Label-based state confuses humans who edit labels by hand | medium | rows are rebuilt from labels + `worc list` each tick, so a hand edit is adopted rather than fought; the operator guide says what each label means |
-| `worc list --format json` shape changes under the connector | low | phase 02 names the shape as a contract in worc's guide; the connector pins a minimum worc version |
+| `worc list --format json` shape changes under the connector | low | phase 02 names the shape as a contract in worc's guide; the connector names a minimum worc version in its README and establishes it once per process from `worc --version`, falling back to the pre-contract behaviour below it |
 | The triage report needs a home the connector may read without touching `.worc/` | decided (Q-6) | phase 08 makes the report directory a flow property and lets the private policy name one outside `.worc/`; the publish-time leak check stays the guard, so a connector home that is not gitignored fails the triage task closed instead of leaking |
 | A gate reject is invisible outside `.worc/` (no `tasks` row; reason only in the ledger and `.worc/logs/<id>/`) — the connector cannot name the reason without reading worc's private home | certain (verified) | Q-12 decided (b): phase 02 adds a `rejected` section to `worc list --format json --all` (FR-W3, D15); phase 06 reads the reason from it; before that the connector reports the reject without a reason and points at `worc status <id>` |

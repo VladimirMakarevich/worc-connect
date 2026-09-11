@@ -92,4 +92,4 @@ sequenceDiagram
 ## What the operator does not get in v1
 
 - No question back to the issue author: a human round-trip from `refinement` or `planning` goes to Telegram, as today.
-- No reproduction and no "not actionable" verdict: an issue a maintainer labels is trusted to be actionable. Both come back with `triage.enabled: true`.
+- No reproduction and no "not actionable" verdict: an issue a maintainer labels is trusted to be actionable. Both come back with `research.mode: worc`.

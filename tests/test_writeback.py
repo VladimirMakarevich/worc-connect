@@ -27,6 +27,7 @@ def row(
     pr_url: str | None = None,
     pr_merged: bool = False,
     last_status: str | None = None,
+    validation_reason: str | None = None,
 ) -> ItemRow:
     return ItemRow(
         tracker="github",
@@ -41,6 +42,7 @@ def row(
         pr_url=pr_url,
         pr_merged=pr_merged,
         last_status=last_status,
+        validation_reason=validation_reason,
     )
 
 
@@ -48,16 +50,24 @@ def write_back(clone: Path, adapter: StubAdapter, **config: object) -> WriteBack
     return WriteBack(config=connector_config(clone, **config), adapter=adapter)
 
 
-def test_the_five_visible_phases_map_to_the_five_states() -> None:
+def test_every_visible_phase_maps_to_one_state_and_back(clone: Path) -> None:
     assert set(PHASE_STATES) == {
         Phase.QUEUED,
         Phase.RUNNING,
         Phase.PR_OPEN,
         Phase.DONE,
         Phase.FAILED,
+        Phase.NEEDS_INFO,
+        Phase.DECLINED,
     }
     reversed_mapping = {state: phase for phase, state in PHASE_STATES.items()}
     assert reversed_mapping == STATE_PHASES
+
+
+def test_a_triage_task_whose_report_was_actionable_shows_the_item_nothing() -> None:
+    # What the item should show then is the implementation task's own state; "analysed" is a step
+    # nobody can act on, and a label for it would be one more notification for nothing.
+    assert Phase.RESEARCHED not in PHASE_STATES
 
 
 @pytest.mark.parametrize("phase", [Phase.GATED, Phase.STAGED])
@@ -142,6 +152,34 @@ def test_a_failure_comment_never_repeats_worcs_own_output(clone: Path) -> None:
     assert "gh-142" in body
     assert "worc status gh-142" in body
     assert "Traceback" not in body and "diff" not in body
+
+
+def test_a_refused_task_names_the_reason_worc_published_and_nothing_else(clone: Path) -> None:
+    adapter = StubAdapter(items=[work_item(labels=("worc", "worc:queued"))])
+
+    write_back(clone, adapter).publish(
+        row(Phase.FAILED, last_status="rejected", validation_reason="injection_suspected"),
+        adapter.items[0],
+    )
+
+    body = adapter.comments[0][1]
+    assert "gh-142" in body
+    assert "injection_suspected" in body
+    # The entry carries more than the reason; none of the rest is the connector's to republish.
+    assert "rejected_at" not in body and "2026-" not in body
+    assert ".worc/" not in body
+
+
+def test_a_refusal_worc_published_no_reason_for_reads_as_it_did_before_the_contract(
+    clone: Path,
+) -> None:
+    adapter = StubAdapter(items=[work_item(labels=("worc", "worc:queued"))])
+
+    write_back(clone, adapter).publish(row(Phase.FAILED, last_status="failed"), adapter.items[0])
+
+    body = adapter.comments[0][1]
+    assert "worc status gh-142" in body
+    assert "validation" not in body
 
 
 def test_a_merged_pull_request_closes_the_item_with_a_message(clone: Path) -> None:

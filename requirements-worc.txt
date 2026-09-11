@@ -13,4 +13,10 @@
 #     pip install -r requirements-worc.txt
 #
 # Without it, `tests/test_worc_gate.py` skips and the rest of the suite is unaffected.
-wastech-orchestrator @ git+https://github.com/VladimirMakarevich/wastech-orchestrator.git
+#
+# The branch is named: the contract this connector adopts — `references:`, `pr_url` and the
+# `rejected` section in the JSON listing, and `flow.report_dir` — is on worc's `dev` and not yet on
+# its default branch, and the suites that judge a generated task file and the shipped triage flow
+# must run against the real rules rather than against a copy of them. Drop the suffix once the
+# contract is worc's default; the two suites skip with a reason against a worc that predates it.
+wastech-orchestrator @ git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@dev

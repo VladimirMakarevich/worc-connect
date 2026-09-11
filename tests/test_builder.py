@@ -213,6 +213,28 @@ def test_a_follow_up_continues_the_previous_branch_instead_of_naming_a_new_one(c
     assert draft.branch == "worc/gh-142-first-try"
 
 
+def test_a_closing_line_is_emitted_as_the_references_key(clone: Path) -> None:
+    draft = builder.build(work_item(), connector_config(clone), seq=1, references=("Fixes #142",))
+
+    assert front_matter(draft.content)["references"] == ["Fixes #142"]
+
+
+def test_no_closing_line_means_no_references_key_at_all(clone: Path) -> None:
+    # Not an empty list: worc's gate refuses `references: []` outright, and a key an older worc
+    # does not know is a hard reject whatever its value.
+    draft = builder.build(work_item(), connector_config(clone), seq=1)
+
+    assert "references" not in front_matter(draft.content)
+
+
+def test_the_closing_line_is_the_callers_and_is_never_derived_from_the_item(clone: Path) -> None:
+    # The keyword belongs to a tracker adapter, so the builder renders whatever it is handed and
+    # invents nothing — a core that guessed `Fixes #<n>` would have learned one tracker's syntax.
+    draft = builder.build(work_item(), connector_config(clone), seq=1, references=("AB#142",))
+
+    assert front_matter(draft.content)["references"] == ["AB#142"]
+
+
 def test_the_body_opens_with_provenance_and_then_the_item_text_verbatim(clone: Path) -> None:
     item = work_item(body="The validator lets a bare domain through.\n\n```sh\nrm -rf /\n```")
 

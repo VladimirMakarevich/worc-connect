@@ -21,6 +21,7 @@ from support import (
     FakeWorc,
     StubAdapter,
     connector_config,
+    listed_task,
     pull_request,
     work_item,
 )
@@ -199,6 +200,114 @@ def test_a_task_worcs_gate_rejected_is_reported_without_inventing_a_reason(
     assert row_of(store).phase is Phase.FAILED
     body = adapter.comments[-1][1]
     assert "gh-142" in body and "worc status gh-142" in body
+
+
+def test_a_refused_task_reports_the_reason_worc_published_for_it(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    adapter = StubAdapter(items=[work_item()])
+    loop = watcher(home, adapter, store)
+    loop.tick(dry_run=False)
+    # The reject as worc now publishes it: the file left pending/, and the `--all` listing carries
+    # the id in its rejected section with the reason the gate recorded.
+    (home.clone_path / "tasks" / "pending" / "gh-142.md").unlink()
+    fake_worc.configure(
+        entries=[listed_task("gh-142", "rejected", validation_reason="injection_suspected")]
+    )
+
+    loop.tick(dry_run=False)
+
+    row = row_of(store)
+    assert (row.phase, row.validation_reason) == (Phase.FAILED, "injection_suspected")
+    assert adapter.states[-1][1] == "failed"
+    assert "injection_suspected" in adapter.comments[-1][1]
+
+
+def test_a_refused_task_is_terminal_even_while_worc_still_lists_the_id(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    # The id never leaves the rejected section, so a connector that read it as "worc has this one"
+    # would wait on a task that will never run.
+    adapter = StubAdapter(items=[work_item()])
+    loop = watcher(home, adapter, store)
+    loop.tick(dry_run=False)
+    fake_worc.configure(
+        entries=[listed_task("gh-142", "rejected", validation_reason="injection_suspected")]
+    )
+
+    loop.tick(dry_run=False)
+    loop.tick(dry_run=False)
+
+    assert row_of(store).phase is Phase.FAILED
+    assert [state for _, state, _ in adapter.states].count("failed") == 1
+
+
+def test_the_pull_request_worc_recorded_is_used_instead_of_searching_the_branch(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    url = "https://github.com/OWNER/REPO/pull/201"
+    adapter = StubAdapter(items=[work_item()], pull_requests={201: pull_request()})
+    loop = watcher(home, adapter, store)
+    loop.tick(dry_run=False)
+    fake_worc.configure(entries=[listed_task("gh-142", "done", pr_url=url)])
+
+    loop.tick(dry_run=False)
+
+    row = row_of(store)
+    assert (row.phase, row.pr_number, row.pr_url) == (Phase.PR_OPEN, 201, url)
+    # worc's own record names the request exactly, so the branch is never searched — which is the
+    # case a squash merge that deleted the head leaves behind.
+    assert adapter.found_by_url == [url]
+    assert adapter.found_by_branch == []
+
+
+def test_a_worc_that_recorded_no_pull_request_is_still_searched_by_branch(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    adapter = StubAdapter(items=[work_item()], pull_request=pull_request())
+    loop = watcher(home, adapter, store)
+    loop.tick(dry_run=False)
+    fake_worc.entries(**{"gh-142": "done"})  # an entry whose `pr_url` is null
+
+    loop.tick(dry_run=False)
+
+    assert adapter.found_by_url == []
+    assert adapter.found_by_branch == [BRANCH]
+    assert row_of(store).pr_number == 201
+
+
+def test_a_worc_that_ships_the_contract_gets_the_tracker_s_closing_line(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    watcher(home, StubAdapter(items=[work_item()]), store).tick(dry_run=False)
+
+    staged = (home.clone_path / "tasks" / "pending" / "gh-142.md").read_text(encoding="utf-8")
+    # Quoted by the YAML writer because `#` after a space would otherwise open a comment; worc
+    # reads back the bare line and appends exactly that to the pull-request body.
+    assert "references:\n- 'Fixes #142'\n" in staged
+
+
+def test_a_worc_from_before_the_contract_gets_no_references_key_at_all(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    fake_worc.configure(version="0.13.0a1")
+
+    watcher(home, StubAdapter(items=[work_item()]), store).tick(dry_run=False)
+
+    staged = (home.clone_path / "tasks" / "pending" / "gh-142.md").read_text(encoding="utf-8")
+    assert "references" not in staged
+    assert "Fixes #142" not in staged
+
+
+def test_a_tracker_with_no_closing_keyword_emits_no_references_key(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    adapter = StubAdapter(items=[work_item()], closing_keyword=None)
+
+    watcher(home, adapter, store).tick(dry_run=False)
+
+    staged = (home.clone_path / "tasks" / "pending" / "gh-142.md").read_text(encoding="utf-8")
+    assert "references" not in staged
 
 
 def test_a_trigger_label_removed_while_queued_changes_nothing_about_the_task(

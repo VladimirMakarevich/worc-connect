@@ -9,16 +9,13 @@ Two operational properties matter as much as the logic:
 
 * **A failing tracker costs one tick.** All three adapter failures — unreachable, throttled, not
   logged in — are caught here, logged by class, and change no state. The next tick is the retry.
-* **Stopping is a file, not a signal.** The loop polls a sentinel while it sleeps and keeps its own
-  PID file, so a second watcher in the same clone is refused and a stop behaves identically on
-  Windows and POSIX, where no process can signal another one it does not own.
+* **Stopping is a file, not a signal** — a sentinel the loop polls and a PID file it holds, both of
+  them in the connector's home. The mechanism lives next door; what the loop owns is when to ask.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
@@ -28,6 +25,7 @@ from typing import Final
 
 from worc_connect.config import ConnectorConfig
 from worc_connect.core import builder, gate
+from worc_connect.core.control import ProcessControl
 from worc_connect.core.items import WorkItem
 from worc_connect.core.reconcile import Reconciler
 from worc_connect.core.state import (
@@ -36,6 +34,7 @@ from worc_connect.core.state import (
     TERMINAL_PHASES,
     ItemRow,
     Phase,
+    Stage,
     StateStore,
     read_watermark,
     write_watermark,
@@ -52,10 +51,6 @@ logger = logging.getLogger(__name__)
 # otherwise fall between two listings and never be seen. Re-listing an item is free: it already has
 # a row, so the overlap is idempotent by construction.
 WATERMARK_OVERLAP: Final = timedelta(minutes=10)
-
-# How often the sleep between ticks looks at the stop sentinel. Short enough that a stop is acted on
-# while the operator is still watching, long enough to be invisible next to a five-minute interval.
-STOP_POLL_SECONDS: Final = 1.0
 
 # Exit codes: 0 a completed pass, 1 an infrastructure failure or a refused start. A configuration
 # problem is exit 2 and never reaches this module — the CLI refuses before a loop exists.
@@ -147,7 +142,11 @@ class Watcher:
         now = self.now_fn()
         items = self.adapter.list_items(self._listing_floor())
         reconciler = Reconciler(
-            config=self.config, store=self.store, worc=self.worc, adapter=self.adapter
+            config=self.config,
+            store=self.store,
+            worc=self.worc,
+            adapter=self.adapter,
+            home=self.home,
         )
         write_back = WriteBack(config=self.config, adapter=self.adapter)
         actions = tuple(
@@ -176,17 +175,18 @@ class Watcher:
         A dry run claims no PID file: it promises to write nothing at all, and one watcher's promise
         not to write must not turn into a lock on the next one.
         """
+        control = ProcessControl(home=self.home, now_fn=self.now_fn, sleep_fn=self.sleep_fn)
         tracked = not dry_run
-        if tracked and not self._claim_pid_file():
+        if tracked and not control.claim():
             return _EXIT_FAILED
         try:
-            while not self._stop_requested():
+            while not control.stop_requested():
                 self._guarded_tick(dry_run=dry_run)
-                if not self._sleep_between_ticks():
+                if not control.sleep(float(self.config.poll_interval_seconds)):
                     break
         finally:
             if tracked:
-                self._release_pid_file()
+                control.release()
         return _EXIT_OK
 
     def _guarded_tick(self, *, dry_run: bool) -> None:
@@ -215,7 +215,7 @@ class Watcher:
         """Decide — and, unless this is a dry run, carry out — what happens to one item."""
         verdict = gate.evaluate(item, self.config.gate)
         row = self._known_row(item, reconciler=reconciler, dry_run=dry_run, now=now)
-        if row is not None and not self._is_retrigger(row, admitted=verdict.admitted):
+        if row is not None and not self._is_retrigger(row, item, admitted=verdict.admitted):
             return self._follow(
                 item,
                 row,
@@ -254,7 +254,7 @@ class Watcher:
         return None if state is None else reconciler.rebuild(item, state, now=now)
 
     @staticmethod
-    def _is_retrigger(row: ItemRow, *, admitted: bool) -> bool:
+    def _is_retrigger(row: ItemRow, item: WorkItem, *, admitted: bool) -> bool:
         """Whether this sighting starts a **new** attempt at an item the connector already handled.
 
         Only a row that is finished — or waiting on a pull request, which worc is done with — can
@@ -262,8 +262,17 @@ class Watcher:
         a fresh request rather than the same one still standing: the label taken off, or the item
         closed by the connector itself. An id is never reused, so the new attempt gets the next
         sequence number.
+
+        A row the triage step left at ``needs-info`` is the one case that needs no arming: the
+        connector asked the reporter a question, so the reporter answering it — the item changing
+        after the row was written — *is* the new request, and waiting for a label to be cycled would
+        make the round trip a step the operator has to perform by hand.
         """
-        return admitted and row.retrigger_armed and row.phase in _RETRIGGERABLE_PHASES
+        if not admitted:
+            return False
+        if row.phase is Phase.NEEDS_INFO:
+            return _answered(row, item)
+        return row.retrigger_armed and row.phase in _RETRIGGERABLE_PHASES
 
     def _take_on(
         self,
@@ -285,8 +294,13 @@ class Watcher:
         row = self._new_row(item, seq=seq, branch=branch_ref, now=now)
         if dry_run:
             # The builder is pure, so the plan can name the id and the branch the real tick would
-            # allocate without anything being written anywhere.
-            draft = builder.build(item, self.config, seq=seq, branch_ref=branch_ref)
+            # allocate without anything being written anywhere — the triage task's, where the
+            # analysis step is on, because that is the task this tick would actually queue.
+            draft = (
+                builder.build_research(item, self.config, seq=seq)
+                if self.config.research.in_worc
+                else builder.build(item, self.config, seq=seq, branch_ref=branch_ref)
+            )
             _log(item, draft.task_id, Action.STAGE, reason)
             return PlannedAction(
                 item.identifier,
@@ -392,6 +406,7 @@ class Watcher:
             updated_at=now,
             branch=branch,
             item_updated_at=item.updated_at,
+            stage=Stage.RESEARCH if self.config.research.in_worc else Stage.IMPLEMENTATION,
         )
 
     def _advance_watermark(self, items: Sequence[WorkItem], *, dry_run: bool) -> datetime | None:
@@ -421,53 +436,14 @@ class Watcher:
         if not dry_run:
             self._note_tick(self.now_fn(), f"skipped {type(exc).__name__}")
 
-    def _stop_requested(self) -> bool:
-        """Whether the stop sentinel is present; it is consumed so the next start is not stopped."""
-        if not self.home.stop_path.is_file():
-            return False
-        self.home.stop_path.unlink(missing_ok=True)
-        logger.info("item=- task=- action=stop result=sentinel")
-        return True
 
-    def _sleep_between_ticks(self) -> bool:
-        """Sleep out the poll interval, returning False as soon as a stop is requested.
+def _answered(row: ItemRow, item: WorkItem) -> bool:
+    """Whether the item has changed since the row that asked its reporter a question was written.
 
-        Sliced rather than slept in one call so a stop written mid-interval is acted on within a
-        second instead of waiting out the operator's poll interval.
-        """
-        remaining = float(self.config.poll_interval_seconds)
-        while remaining > 0:
-            if self._stop_requested():
-                return False
-            slice_seconds = min(STOP_POLL_SECONDS, remaining)
-            self.sleep_fn(slice_seconds)
-            remaining -= slice_seconds
-        return True
-
-    def _claim_pid_file(self) -> bool:
-        """Write the PID file, or refuse to start because another watcher holds it.
-
-        Presence is the claim: a watcher writes the file on start and removes it on a clean exit.
-        Liveness is deliberately not probed — a process cannot be probed portably without signals,
-        which do not reach a foreign process on Windows — so a file left behind by a crash is
-        refused with the path to delete rather than guessed about.
-        """
-        path = self.home.pid_path
-        if path.is_file():
-            logger.error(
-                "item=- task=- action=start result=refused (another watcher holds %s; "
-                "delete it if no connector is running)",
-                path.as_posix(),
-            )
-            return False
-        path.parent.mkdir(parents=True, exist_ok=True)
-        record = {"pid": os.getpid(), "started_at": self.now_fn().astimezone(UTC).isoformat()}
-        path.write_text(json.dumps(record) + "\n", encoding="utf-8", newline="")
-        return True
-
-    def _release_pid_file(self) -> None:
-        """Remove the PID file so the next watcher can start; safe if it is already gone."""
-        self.home.pid_path.unlink(missing_ok=True)
+    A row with no stamp to compare against is not treated as answered: the connector would then
+    re-trigger on every tick, which is the one direction a fail-closed gate must not lean.
+    """
+    return row.item_updated_at is not None and item.updated_at > row.item_updated_at
 
 
 def _log(item: WorkItem, task_id: str | None, action: Action, result: str) -> None:

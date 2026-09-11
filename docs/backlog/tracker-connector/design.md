@@ -80,11 +80,11 @@ The shape mirrors worc's own architecture on purpose: a core that knows no exter
 
 ### D12 — Triage is optional and converges on one builder
 
-**Decision.** `triage.enabled: false` by default. When on: the item becomes a triage task (`task_type: <triage flow name>`, `priority: high` so it does not wait behind long implementation tasks), the connector waits for it to end, reads its report, and either runs the **same** task builder on the report (verdict `actionable`) or writes back `needs-info` / `duplicate` / `declined` with the report's one-paragraph reason. The flow YAML and its role prompts are shipped in the connector repository and copied into `.worc/flows/` by `worc-connect install-flow`, only when the switch is on. The report's delivery channel (Q-6, decided 2026-09-11) is the connector's own home: the flow declares `output_policy: private_control_workspace_report`, `publishing: none` and `report_dir: .worc-connect/triage` (D16, worc phase 08), so the report lands at `<repo>/.worc-connect/triage/<task_id>/report.md` — confined there by worc's after-stage guard, never committed, and read by the connector from a directory it owns. The reproduction node's failing test travels as text inside the report (the private policy confines every write to the report directory), and the deterministic builder decides what of it reaches the implementation task.
+**Decision.** `research.mode: off` by default. When on: the item becomes a triage task (`task_type: <triage flow name>`, `priority: high` so it does not wait behind long implementation tasks), the connector waits for it to end, reads its report, and either runs the **same** task builder on the report (verdict `actionable`) or writes back `needs-info` / `duplicate` / `declined` with the report's one-paragraph reason. The flow YAML and its role prompts are shipped in the connector repository and copied into `.worc/flows/` by `worc-connect install-flow`, only when the switch is on. The report's delivery channel (Q-6, decided 2026-09-11) is the connector's own home: the flow declares `output_policy: private_control_workspace_report`, `publishing: none` and `report_dir: .worc-connect/triage` (D16, worc phase 08), so the report lands at `<repo>/.worc-connect/triage/<task_id>/report.md` — confined there by worc's after-stage guard, never committed, and read by the connector from a directory it owns. The reproduction node's failing test travels as text inside the report (the private policy confines every write to the report directory), and the deterministic builder decides what of it reaches the implementation task.
 
 ### D13 — v1 closes the item itself; `references:` makes that optional
 
-**Decision.** In v1 the connector closes the issue on merge via `gh issue close --comment`. Once `references:` ships (phase 06), the connector also emits `Fixes #<n>`, and an operator can set `close_on_merge: false` to let GitHub close on merge to the default branch instead.
+**Decision.** In v1 the connector closes the issue on merge via `gh issue close --comment`. Once `references:` ships (phase 06), the connector also emits `Fixes #<n>`, and an operator can set `close_on_merge: false` to let GitHub close on merge to the default branch instead. The closing line is authored by the adapter (`TrackerAdapter.closing_reference`), never by the core, so no core module learns a tracker's keyword; the key is emitted only against a worc that accepts it, which the connector establishes once per process from `worc --version` against a minimum its README names. That handshake is the connector's second and last read out of worc, and it fails closed: an unidentifiable worc gets a task built exactly as it was before the contract.
 
 ### D14 — A published PR is the owner's to edit; the connector only watches it
 
@@ -126,6 +126,7 @@ worc-connect/                   # VladimirMakarevich/worc-connect, created 2026-
       gate.py              trigger label / author allow-list
       state.py             SQLite store under .worc-connect/
       builder.py           task id, branch, title sanitizer, body, front matter
+      triage.py            the triage report: where it lands, its verdict block, what is read
       handoff.py           write to tasks/preparing/, run `worc promote`
       reconcile.py         worc list --format json + PR by branch → phase
       writeback.py         state label transitions, comments, close
@@ -133,7 +134,8 @@ worc-connect/                   # VladimirMakarevich/worc-connect, created 2026-
     trackers/
       base.py              TrackerAdapter protocol
       github/              gh-based adapter (extra: github)
-    packaged/flows/        issue_triage.yaml + role prompts (installed only with triage on)
+    flows.py               the shipped flow, and the one write allowed inside `.worc/flows/`
+    packaged/flows/        issue_triage.yaml + role prompts (installed only with the step on)
   tests/                   fake `gh` and fake `worc` executables; unit seams
 ```
 
@@ -200,9 +202,9 @@ write_back:
   labels_prefix: "worc:"
   comment: true
   close_on_merge: true
-triage:
-  enabled: false
-  flow: issue_triage
+research:
+  mode: "off" # "off" | "worc" | "local" — quoted: YAML reads a bare `off` as the boolean false
+  flow: issue_triage # read by `worc` only
 ```
 
 **Generated task file** (`tasks/preparing/gh-142.md`):

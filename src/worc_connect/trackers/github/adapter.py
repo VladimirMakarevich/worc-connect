@@ -14,6 +14,7 @@ command.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -68,6 +69,15 @@ _STATE_NAMES: Final = {str(state) for state in ItemState}
 # have cut off the newer end alone.
 _SORT_OLDEST_UPDATE_FIRST: Final = "sort:updated-asc"
 
+# The pull-request number inside a GitHub pull-request URL. Matched rather than parsed as a URL
+# because the only thing wanted out of it is the number, and the number is what may reach an
+# argument list — the URL itself never does.
+_PULL_REQUEST_URL: Final = re.compile(r"/pull/(\d+)(?:[/?#]|$)")
+
+# GitHub's own closing keyword. Written into the task's `references`, which worc appends to the
+# pull-request body verbatim; the keyword is this adapter's knowledge and worc learns none of it.
+_CLOSING_KEYWORD: Final = "Fixes"
+
 
 @dataclass(frozen=True)
 class GitHubAdapter:
@@ -109,13 +119,22 @@ class GitHubAdapter:
             raise TrackerUnavailable("`gh issue view` returned no issue object")
         return work_item(payload, state=None)
 
-    def find_pull_request(self, branch: str) -> PullRequest | None:
-        """The pull request opened for ``branch`` in any state, or ``None`` while there is none.
+    def find_pull_request(self, branch: str, *, url: str | None = None) -> PullRequest | None:
+        """The pull request the task opened, by the URL worc recorded or by the branch.
 
-        An open request wins over a closed one when the branch carries both, because that is the one
-        the task is still working through; the caller stores its number and stops searching by
-        branch, which is what keeps the follow-through alive after the branch is deleted.
+        worc's own record wins: it names one request exactly, and it is still true after a squash
+        merge deleted the head, which is the case a branch query cannot answer at all. The URL
+        never reaches an argument list — the number is read out of it and is a number by the time
+        it does, exactly as an issue identifier is.
+
+        Falling back to the branch, an open request wins over a closed one when the branch carries
+        both, because that is the one the task is still working through; the caller stores its
+        number and stops searching by branch, which is what keeps the follow-through alive after
+        the branch is deleted.
         """
+        recorded = _pull_request_number(url)
+        if recorded is not None:
+            return self.get_pull_request(recorded)
         payload = self.command.read_json(
             "pr",
             "list",
@@ -165,8 +184,8 @@ class GitHubAdapter:
         """Move the issue to ``state`` in one edit, so it never carries two states or none."""
         arguments = ["issue", "edit", _number(identifier)]
         if previous is not None and previous is not state:
-            arguments += ["--remove-label", self.label_for(previous)]
-        arguments += ["--add-label", self.label_for(state)]
+            arguments += ["--remove-label", self._label_for(previous)]
+        arguments += ["--add-label", self._label_for(state)]
         self.command.run(*arguments)
 
     def comment(self, identifier: str, body_path: Path) -> None:
@@ -195,13 +214,35 @@ class GitHubAdapter:
             entry.get("name") for entry in entries(payload) if isinstance(entry.get("name"), str)
         }
         for state in states:
-            name = self.label_for(state)
+            name = self._label_for(state)
             if name not in present:
                 self.command.run("label", "create", name, "--description", _LABEL_DESCRIPTION)
 
-    def label_for(self, state: ItemState) -> str:
+    def closing_reference(self, item: WorkItem) -> str | None:
+        """The line that makes GitHub close this issue when the pull request is merged.
+
+        Carried in the task's ``references`` and published by worc into the pull-request body
+        verbatim, which is why the number is proven here: the one value of the item's that reaches
+        a body worc writes is a number, and a number can say nothing but which issue it names.
+        """
+        return f"{_CLOSING_KEYWORD} #{_number(item.identifier)}"
+
+    def _label_for(self, state: ItemState) -> str:
         """The label name this tracker publishes ``state`` as."""
         return f"{self.labels_prefix}{state}"
+
+
+def _pull_request_number(url: str | None) -> int | None:
+    """The request number inside a GitHub pull-request URL, or ``None`` for anything else.
+
+    A shape this adapter does not recognise answers ``None`` rather than a guess: the branch query
+    is the fallback, and a number invented out of an unfamiliar URL would read somebody else's
+    pull request.
+    """
+    if url is None:
+        return None
+    found = _PULL_REQUEST_URL.search(url)
+    return None if found is None else int(found.group(1))
 
 
 def _number(identifier: str) -> str:

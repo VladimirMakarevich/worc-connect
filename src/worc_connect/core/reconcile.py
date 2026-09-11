@@ -19,13 +19,12 @@ from datetime import datetime
 from typing import Final
 
 from worc_connect.config import ConnectorConfig
-from worc_connect.core import builder, handoff
+from worc_connect.core import builder, handoff, pullrequest
 from worc_connect.core.items import ItemState, WorkItem
 from worc_connect.core.naming import allocate_branch, allocate_task_id
-from worc_connect.core.pullrequest import PullRequestWatcher
 from worc_connect.core.sanitize import sanitize_title
 from worc_connect.core.state import ItemRow, Phase, StateStore
-from worc_connect.core.worc_cli import WorcCommand, status_token
+from worc_connect.core.worc_cli import REJECTED_STATUS, ListedTask, WorcCommand, status_token
 from worc_connect.core.writeback import STATE_PHASES
 from worc_connect.trackers.base import TrackerAdapter
 
@@ -43,6 +42,9 @@ _STATUS_PHASES: Final = {
     "done": Phase.DONE,
     "failed": Phase.FAILED,
     "manual_action_required": Phase.FAILED,
+    # An id worc's gate refused. It has no task row, so this entry is the only place outside worc's
+    # private home that names it at all — and the only place its reason can be read from.
+    REJECTED_STATUS: Phase.FAILED,
 }
 
 # The phases worc's own listing still has something to say about.
@@ -67,7 +69,7 @@ class Reconciler:
     store: StateStore
     worc: WorcCommand
     adapter: TrackerAdapter
-    _listing: dict[str, str] | None = None
+    _listing: dict[str, ListedTask] | None = None
 
     def advance(self, row: ItemRow, item: WorkItem, *, now: datetime) -> ItemRow:
         """Move ``row`` as far as this tick can and persist it; returns the row as it now stands.
@@ -82,7 +84,9 @@ class Reconciler:
             self.store.save(moved)
             return moved
         moved = self._follow_task(moved, now=now)
-        moved = PullRequestWatcher(adapter=self.adapter).advance(moved, now=now)
+        moved = pullrequest.PullRequestWatcher(adapter=self.adapter).advance(
+            moved, url=self._recorded_pr_url(moved), now=now
+        )
         if moved != row:
             self.store.save(moved)
         return moved
@@ -112,8 +116,8 @@ class Reconciler:
         _log(rebuilt, "rebuild", str(state))
         return rebuilt
 
-    def listing(self) -> dict[str, str]:
-        """worc's statuses for this tick, read once and reused by every row that needs them."""
+    def listing(self) -> dict[str, ListedTask]:
+        """worc's entries for this tick, read once and reused by every row that needs them."""
         if self._listing is None:
             self._listing = self.worc.list_tasks()
         return self._listing
@@ -134,7 +138,13 @@ class Reconciler:
         A branch already on the row means this attempt continues the previous one's pull request
         rather than opening a second one, so the task is built with that branch as its ref.
         """
-        draft = builder.build(item, self.config, seq=row.seq, branch_ref=row.branch)
+        draft = builder.build(
+            item,
+            self.config,
+            seq=row.seq,
+            branch_ref=row.branch,
+            references=self._references(item),
+        )
         handoff.stage(draft, self.config)
         staged = replace(
             row, task_id=draft.task_id, branch=draft.branch, phase=Phase.STAGED, updated_at=now
@@ -144,6 +154,19 @@ class Reconciler:
         self.store.save(staged)
         _log(staged, "stage", "ok")
         return staged
+
+    def _references(self, item: WorkItem) -> tuple[str, ...]:
+        """The closing line this task may carry, if the installed worc accepts the key at all.
+
+        The adapter authors the line in its own tracker's keyword and worc appends it to the pull
+        request it opens without interpreting it, which is how the item can be closed by the code
+        host itself. A worc that does not know the key gets a task without one: an unknown
+        front-matter key is a hard reject, not a warning.
+        """
+        if not self.worc.accepts_references():
+            return ()
+        line = self.adapter.closing_reference(item)
+        return () if line is None else (line,)
 
     def _promote(self, row: ItemRow, *, now: datetime) -> ItemRow:
         """Hand the staged file to worc, or work out what happened to a file that is gone."""
@@ -159,12 +182,33 @@ class Reconciler:
         return replace(row, phase=Phase.QUEUED, updated_at=now)
 
     def _resolve_missing(self, row: ItemRow, task_id: str, *, now: datetime) -> ItemRow:
-        """Decide what a staged file that is no longer staged means."""
-        if handoff.is_handed_over(self.config, task_id) or task_id in self.listing():
+        """Decide what a staged file that is no longer staged means.
+
+        The file on disk is consulted before worc's listing so that the common answer — worc holds
+        it — costs no launch at all.
+        """
+        if handoff.is_handed_over(self.config, task_id):
             _log(row, "promote", "already-pending")
             return replace(row, phase=Phase.QUEUED, updated_at=now)
-        _log(row, "promote", "no-task")
-        return replace(row, phase=Phase.FAILED, last_status=None, updated_at=now)
+        entry = self.listing().get(task_id)
+        if entry is None:
+            _log(row, "promote", "no-task")
+            return replace(row, phase=Phase.FAILED, last_status=None, updated_at=now)
+        if status_token(entry.status) == REJECTED_STATUS:
+            return self._refused(row, entry, now=now)
+        _log(row, "promote", "already-pending")
+        return replace(row, phase=Phase.QUEUED, updated_at=now)
+
+    def _refused(self, row: ItemRow, entry: ListedTask, *, now: datetime) -> ItemRow:
+        """worc's gate refused the task: terminal, and carrying the reason worc published for it."""
+        _log(row, "follow", REJECTED_STATUS)
+        return replace(
+            row,
+            phase=Phase.FAILED,
+            last_status=entry.status,
+            validation_reason=entry.validation_reason,
+            updated_at=now,
+        )
 
     # --- following worc ------------------------------------------------------------------------
 
@@ -177,16 +221,18 @@ class Reconciler:
         task_id = row.task_id
         if row.phase not in _FOLLOWED_PHASES or task_id is None:
             return row
-        status = self.listing().get(task_id)
-        if status is None:
+        entry = self.listing().get(task_id)
+        if entry is None:
             return self._unknown_to_worc(row, task_id, now=now)
-        phase = _STATUS_PHASES.get(status_token(status))
+        if status_token(entry.status) == REJECTED_STATUS:
+            return self._refused(row, entry, now=now)
+        phase = _STATUS_PHASES.get(status_token(entry.status))
         if phase is None or phase is Phase.DONE:
             # An unknown status is not guessed at either: the row keeps its phase and the next tick
             # asks again, which is the fail-closed direction for a vocabulary that may grow.
-            return replace(row, last_status=status, updated_at=now)
-        _log(row, "follow", status)
-        return replace(row, phase=phase, last_status=status, updated_at=now)
+            return replace(row, last_status=entry.status, updated_at=now)
+        _log(row, "follow", entry.status)
+        return replace(row, phase=phase, last_status=entry.status, updated_at=now)
 
     def _unknown_to_worc(self, row: ItemRow, task_id: str, *, now: datetime) -> ItemRow:
         """A task worc's listing does not know: still a queued file, or gone for good.
@@ -199,6 +245,18 @@ class Reconciler:
             return row
         _log(row, "follow", "no-task")
         return replace(row, phase=Phase.FAILED, last_status=None, updated_at=now)
+
+    def _recorded_pr_url(self, row: ItemRow) -> str | None:
+        """worc's own record of the pull request this task opened, read only where it is needed.
+
+        Asked for exactly while the row still has to discover its request, which keeps the quiet
+        tick quiet: a row that already holds a number, or that is not looking at all, costs no
+        worc launch to establish that.
+        """
+        if row.task_id is None or not pullrequest.needs_discovery(row):
+            return None
+        entry = self.listing().get(row.task_id)
+        return None if entry is None else entry.pr_url
 
     # --- rebuilding ----------------------------------------------------------------------------
 

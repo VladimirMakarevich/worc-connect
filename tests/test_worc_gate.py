@@ -16,7 +16,13 @@ from pathlib import Path
 
 import pytest
 
-from support import connector_config, requires_worc, task_config, work_item
+from support import (
+    connector_config,
+    requires_worc,
+    requires_worc_references,
+    task_config,
+    work_item,
+)
 from worc_connect.core import builder
 
 pytestmark = requires_worc
@@ -89,6 +95,59 @@ def test_a_re_triggered_task_continuing_a_branch_passes(gate: object, clone: Pat
 
     assert result.passed is True, f"{result.reason}: {result.detail}"  # type: ignore[attr-defined]
     assert draft.task_id == "gh-142.2"
+
+
+@requires_worc_references
+def test_the_closing_line_the_adapter_authors_passes_the_gate(gate: object, clone: Path) -> None:
+    draft = builder.build(work_item(), connector_config(clone), seq=1, references=("Fixes #142",))
+
+    result = judge(gate, draft.content)
+
+    assert result.passed is True, f"{result.reason}: {result.detail}"  # type: ignore[attr-defined]
+    # worc parses the key back to the exact line the adapter wrote; it is what it appends to the
+    # pull-request body, so a value the gate reshaped would close a different issue or none.
+    assert result.normalized.references == ("Fixes #142",)  # type: ignore[attr-defined]
+
+
+@requires_worc_references
+def test_a_hostile_item_with_a_closing_line_still_passes_the_gate(
+    gate: object, clone: Path
+) -> None:
+    # The same item AC-4 builds from, now carrying the contract key: the front-matter injection
+    # scan recurses into lists, so the reference is scanned exactly like the title is.
+    item = work_item(
+        title=HOSTILE_TITLE,
+        body="\n".join(["x" * 10_000, *["padding line"] * 20_000]),
+    )
+    config = connector_config(
+        clone,
+        task=task_config(
+            task_type="implementation", queue="default", priority="mid", commit_type="feat"
+        ),
+    )
+
+    result = judge(gate, builder.build(item, config, seq=1, references=("Fixes #142",)).content)
+
+    assert result.passed is True, f"{result.reason}: {result.detail}"  # type: ignore[attr-defined]
+
+
+@requires_worc_references
+def test_the_reference_the_github_adapter_authors_is_the_one_the_gate_accepts(
+    gate: object, clone: Path
+) -> None:
+    # The adapter, not a literal, authors the line — a keyword this repository invented would pass
+    # the gate just as happily and close nothing.
+    from worc_connect.trackers.github import build_adapter
+
+    line = build_adapter(repo="OWNER/REPO", labels_prefix="worc:").closing_reference(work_item())
+    assert line is not None
+
+    result = judge(
+        gate, builder.build(work_item(), connector_config(clone), seq=1, references=(line,)).content
+    )
+
+    assert result.passed is True, f"{result.reason}: {result.detail}"  # type: ignore[attr-defined]
+    assert result.normalized.references == ("Fixes #142",)  # type: ignore[attr-defined]
 
 
 def test_the_builders_key_set_is_a_strict_subset_of_the_keys_worc_allows() -> None:

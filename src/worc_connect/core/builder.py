@@ -40,6 +40,7 @@ ALLOWED_KEYS: Final = frozenset(
         "priority",
         "commit_type",
         "auto_merge",
+        "references",
     }
 )
 
@@ -63,18 +64,28 @@ class TaskDraft:
 
 
 def build(
-    item: WorkItem, config: ConnectorConfig, *, seq: int, branch_ref: str | None = None
+    item: WorkItem,
+    config: ConnectorConfig,
+    *,
+    seq: int,
+    branch_ref: str | None = None,
+    references: tuple[str, ...] = (),
 ) -> TaskDraft:
     """Compose the task for attempt ``seq`` at ``item``.
 
     ``branch_ref`` continues an existing branch instead of naming a new one, which is what a
     follow-up on a still-open pull request needs: worc then appends to that branch and reuses its
     pull request rather than opening a second one. Without it the builder allocates a fresh branch.
+
+    ``references`` are lines worc appends verbatim to the pull request it opens and interprets in
+    no way — the tracker's own closing keyword among them. They are supplied by the caller rather
+    than derived here, because the builder must stay deterministic and a key worc's gate does not
+    know is a hard reject: whether one may be emitted at all is a fact about the installed worc.
     """
     task_id = allocate_task_id(config.task.id_prefix, item.identifier, seq)
     title = sanitize_title(item.title, fallback=f"Issue #{item.identifier}")
     branch = branch_ref or allocate_branch(config.task.branch_prefix, task_id, title)
-    front_matter = _front_matter(
+    fields = _front_matter(
         task_id=task_id,
         title=title,
         branch=branch,
@@ -82,6 +93,9 @@ def build(
         task=config.task,
         labels=item.labels,
     )
+    if references:
+        fields["references"] = list(references)
+    front_matter = _dump(fields)
     provenance = _provenance(item, tracker=config.tracker)
     body = truncate_body(
         item.body,
@@ -135,8 +149,12 @@ def _front_matter(
     continues_branch: bool,
     task: TaskConfig,
     labels: tuple[str, ...],
-) -> str:
-    """The front-matter block, carrying only the keys the operator actually configured."""
+) -> dict[str, Any]:
+    """The front-matter fields, carrying only the keys the operator actually configured.
+
+    Returned as a mapping rather than as text so the caller can add the contract keys it decides
+    about without this function growing an argument for each of them.
+    """
     fields: dict[str, Any] = {"id": task_id, "title": title}
     if continues_branch:
         # worc's own pairing rule: `existing` is the mode that requires a ref, and a `branch_ref`
@@ -146,6 +164,11 @@ def _front_matter(
     else:
         fields["branch_name"] = branch
     fields.update(_dispatch_fields(task, labels))
+    return fields
+
+
+def _dump(fields: dict[str, Any]) -> str:
+    """The front-matter block as worc parses it: insertion order kept, one value per line."""
     return yaml.safe_dump(fields, sort_keys=False, allow_unicode=True, width=10**6)
 
 

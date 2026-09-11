@@ -48,7 +48,7 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 
 - **Given** a full tick on a gated item
 - **When** the recorded process launches are inspected
-- **Then** the only `worc` invocation is `promote <id>` as an argv list, no `git` process was launched, and the only path written under the clone is `tasks/preparing/<id>.md`.
+- **Then** the only `worc` invocations are `--version` (the read-only contract handshake, once per process) and `promote <id>`, both as argv lists, no `git` process was launched, and the only path written under the clone is `tasks/preparing/<id>.md`.
 
 ### AC-8 — dry run writes nothing (FR-C8)
 
@@ -97,6 +97,13 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 - **When** a gated item is processed → one task is created and no flow file is written into `.worc/flows/`.
 - **Given** `triage.enabled: true` and `install-flow` has been run
 - **When** a gated item is processed → the first task carries the triage `task_type` and `priority: high`; when the fake `worc` reports it `done` and a report exists at `.worc-connect/triage/<task_id>/report.md` whose verdict is `actionable`, the same builder produces the implementation task; with verdict `needs-info` no implementation task is created and the item receives `worc:needs-info` and a comment; with the task `done` and no report file the item receives `worc:failed` and a comment naming the missing report — nothing under `.worc/` is read.
+
+### AC-18 — the worc contract is adopted only where worc offers it (FR-C4, FR-C11, FR-C12)
+
+- **Given** a fake `worc` reporting the documented minimum version
+- **When** a gated item is built → the task carries `references: ["Fixes #<n>"]`, the adapter's own closing line; **and given** a fake `worc` reporting an older version, or one that cannot be asked at all → the key is absent from the file entirely, and the file is what phase 05 produced.
+- **And given** a `worc list --format json --all` entry carrying `pr_url` → the pull request is read by the number in that URL and `gh pr list --head` is never called; **given** an entry whose `pr_url` is `null` → the branch query is used as before.
+- **And given** the generated file with `references`, fed to worc's real validation gate in a test → it passes, and worc parses back the exact line the adapter wrote.
 
 ### AC-W4 — configurable report directory (FR-W4)
 
@@ -175,7 +182,7 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 | AC-1, AC-2, AC-8, AC-9, AC-10, AC-11, AC-E1, AC-E7 | fake-`gh` integration tests (recorded argv, JSON fixtures) | connector `tests/` |
 | AC-3, AC-7, AC-12, AC-E2, AC-E3, AC-E4, AC-E8, AC-N7 | fake-`gh` + fake-`worc` integration tests | connector `tests/` |
 | AC-16, AC-17, AC-E9 | fake-`gh` + fake-`worc` integration tests (PR fixtures by number) | connector `tests/` |
-| AC-4 | unit tests for sanitizer/truncation + a test that imports worc's real `task.validation_gate` against the generated file | connector `tests/` (worc as a test dependency) |
+| AC-4, AC-18 | unit tests for sanitizer/truncation + tests that import worc's real `task.validation_gate` against the generated file, with and without `references` | connector `tests/` (worc as a test dependency) |
 | AC-5, AC-6 | unit tests on the builder | connector `tests/` |
 | AC-13 | import-linter contract in the connector repository | connector CI |
 | AC-14 | packaging test with and without the extra | connector CI |

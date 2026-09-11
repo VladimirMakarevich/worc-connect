@@ -121,12 +121,30 @@ def _comment_body(row: ItemRow, state: ItemState) -> str | None:
     if state is ItemState.PR_OPEN and row.pr_url:
         return f"worc task `{task}` opened a pull request: {row.pr_url}\n"
     if state is ItemState.FAILED:
-        return (
-            f"worc task `{task}` ended as `{row.last_status or 'failed'}` and opened no pull "
-            f"request.\n\nRun `worc status {task}` on the host that runs worc for the detail — "
-            "the connector does not copy worc's logs onto the tracker.\n"
-        )
+        return _failure_body(row, task)
     return None
+
+
+def _failure_body(row: ItemRow, task: str) -> str:
+    """Why the task ended without a pull request, in as much detail as worc itself published.
+
+    A task worc's validation gate refused has no run to point anybody at, so the reason worc gave
+    is the whole of what can be said — and it is the only thing taken from that entry. Where worc
+    published none, the comment says what it can and sends the operator to the host, which is the
+    one place worc's own record of a task lives.
+    """
+    if row.validation_reason:
+        return (
+            f"worc's validation gate refused task `{task}`: `{row.validation_reason}`.\n\n"
+            "Nothing was queued and no pull request was opened. The task file is in worc's "
+            "quarantine on the host that runs worc; the connector does not read it and never "
+            "re-queues a refused task on its own.\n"
+        )
+    return (
+        f"worc task `{task}` ended as `{row.last_status or 'failed'}` and opened no pull "
+        f"request.\n\nRun `worc status {task}` on the host that runs worc for the detail — "
+        "the connector does not copy worc's logs onto the tracker.\n"
+    )
 
 
 def _closing_message(row: ItemRow) -> str:

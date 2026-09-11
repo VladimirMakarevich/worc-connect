@@ -27,6 +27,7 @@ def row(
     pr_url: str | None = None,
     pr_merged: bool = False,
     last_status: str | None = None,
+    validation_reason: str | None = None,
 ) -> ItemRow:
     return ItemRow(
         tracker="github",
@@ -41,6 +42,7 @@ def row(
         pr_url=pr_url,
         pr_merged=pr_merged,
         last_status=last_status,
+        validation_reason=validation_reason,
     )
 
 
@@ -142,6 +144,34 @@ def test_a_failure_comment_never_repeats_worcs_own_output(clone: Path) -> None:
     assert "gh-142" in body
     assert "worc status gh-142" in body
     assert "Traceback" not in body and "diff" not in body
+
+
+def test_a_refused_task_names_the_reason_worc_published_and_nothing_else(clone: Path) -> None:
+    adapter = StubAdapter(items=[work_item(labels=("worc", "worc:queued"))])
+
+    write_back(clone, adapter).publish(
+        row(Phase.FAILED, last_status="rejected", validation_reason="injection_suspected"),
+        adapter.items[0],
+    )
+
+    body = adapter.comments[0][1]
+    assert "gh-142" in body
+    assert "injection_suspected" in body
+    # The entry carries more than the reason; none of the rest is the connector's to republish.
+    assert "rejected_at" not in body and "2026-" not in body
+    assert ".worc/" not in body
+
+
+def test_a_refusal_worc_published_no_reason_for_reads_as_it_did_before_the_contract(
+    clone: Path,
+) -> None:
+    adapter = StubAdapter(items=[work_item(labels=("worc", "worc:queued"))])
+
+    write_back(clone, adapter).publish(row(Phase.FAILED, last_status="failed"), adapter.items[0])
+
+    body = adapter.comments[0][1]
+    assert "worc status gh-142" in body
+    assert "validation" not in body
 
 
 def test_a_merged_pull_request_closes_the_item_with_a_message(clone: Path) -> None:

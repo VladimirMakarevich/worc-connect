@@ -88,14 +88,26 @@ A key left out here is a key the generated task file does not carry, so worc's o
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `command` | `worc` | The launcher to resolve on `PATH`. Resolution handles a Windows `.exe` / `.cmd`, and the command is always launched as an argument list, never through a shell. |
+| `command` | `worc` | The launcher to resolve on `PATH`. Resolution handles a Windows `.exe` / `.cmd`, and the command is always launched as an argument list, never through a shell. It is asked `--version` once per run — see below. |
 | `repo_path` | `.` | The clone worc runs in, relative to the directory that holds the connector's home. Refused if it is not a directory. |
 | `tasks_dir` | `tasks` | worc's own `paths.tasks_dir`. The connector stages the task file in `<tasks_dir>/preparing/` and reads `<tasks_dir>/pending/` to tell a promoted task from a vanished one. Must be a directory inside the clone, written with forward slashes and no `..` segment. |
 | `max_task_bytes` | `262144` | worc's `validation.max_task_bytes`. The generated file is truncated to fit, with a visible marker and the item's URL. |
 | `max_task_lines` | `5000` | worc's `validation.max_task_lines`, applied the same way. |
 | `max_line_bytes` | `8192` | worc's `validation.max_line_bytes`, applied per line. |
 
-The connector's only write into that clone is a task file in `<tasks_dir>/preparing/`, promoted with `worc promote`; its only read out of worc is `worc list --format json --all`. It never runs `git` there and never touches `.worc/` — **including worc's own `config.yaml`**, which is why the last four keys exist. If you changed `paths.tasks_dir` or any `validation.max_*` in worc, restate the value here: the connector cannot see it, and the mismatch would surface as a task worc never queues or a file its gate quarantines.
+The connector's only write into that clone is a task file in `<tasks_dir>/preparing/`, promoted with `worc promote`; its only reads out of worc are `worc list --format json --all` and `worc --version`. It never runs `git` there and never touches `.worc/` — **including worc's own `config.yaml`**, which is why the last four keys exist. If you changed `paths.tasks_dir` or any `validation.max_*` in worc, restate the value here: the connector cannot see it, and the mismatch would surface as a task worc never queues or a file its gate quarantines.
+
+### Which worc you are running
+
+The connector asks `worc --version` once per run, before it writes its first task file, and adapts to the answer. **0.14.0a1** is the release that ships the contract it uses:
+
+| What it uses | With 0.14.0a1 or newer | With an older worc |
+| --- | --- | --- |
+| `references:` in the task | The task carries `Fixes #<n>`, which worc appends to the pull-request body, so the code host can close the item itself | The key is not emitted at all — an unknown front-matter key is a hard reject at worc's gate, not a warning |
+| `pr_url` in the JSON listing | The pull request is read by the number in the URL worc recorded, so it is found even after a squash merge deleted the head branch | The pull request is searched for by the branch the connector named |
+| the `rejected` section of `--all` | A task the validation gate refused is reported on the item with the reason worc recorded | The refusal is reported without a reason, pointing at `worc status <task-id>` on the host |
+
+The handshake **fails closed**: a worc that cannot be launched, refuses to say what it is, or reports a version this build does not recognise is treated as an older one. You lose the three conveniences above and nothing else.
 
 ## The task file the connector generates
 
@@ -107,6 +119,8 @@ branch_name: worc/gh-142-signup-form-accepts-foo-as-an-email
 priority: mid
 queue: default
 commit_type: fix
+references:
+  - "Fixes #142"
 ---
 
 ## Description
@@ -121,6 +135,7 @@ Source: github item #142 by @reporter — https://github.com/OWNER/REPO/issues/1
 - **The branch** is `<branch_prefix>/<task id>-<slug>`, at most 50 characters: above that worc discards the name and generates its own, which the connector could then not find the pull request by. It always carries the `<branch_prefix>/` segment, so it can never collide with a base branch.
 - **The body** is the item's text, verbatim, under one provenance line. No acceptance criteria are invented for an item that carries none — enriching a thin report is worc's refinement step, not the connector's guess.
 - **A follow-up on an item whose previous pull request is still open** carries `branch_mode: existing` and `branch_ref` instead of `branch_name`, so worc continues that branch and appends to that pull request.
+- **`references`** carries the tracker's own closing keyword (`Fixes #142` for GitHub) when the installed worc accepts the key. worc appends the lines to the pull-request body verbatim and interprets none of them; the keyword is the tracker adapter's knowledge, which is why a tracker that has none produces a task without the key.
 - **Nothing else is emitted.** The key set is a strict subset of worc's allowed keys and can never include `nodes`, `subtasks`, `decomposition`, `trust_level`, `prompt_audit` or `publish`: a task file the connector writes cannot change how worc runs it.
 
 ## `write_back` — what appears on the item
@@ -129,7 +144,7 @@ Source: github item #142 by @reporter — https://github.com/OWNER/REPO/issues/1
 | --- | --- | --- |
 | `labels_prefix` | `worc:` | Prefix of the connector-owned state labels (`worc:queued`, `worc:in-progress`, `worc:pr-open`, `worc:done`, `worc:failed`). Exactly one is present at a time, and re-applying the one the item already shows does nothing. |
 | `comment` | `true` | Whether to comment when the task is queued, when its pull request exists, and when it ends without one. The closing message on a merge is not a comment and is not switched off by this. |
-| `close_on_merge` | `true` | Whether to close the item when its pull request is merged. With it off the item keeps its `worc:done` label and stays open for you to verify and close. |
+| `close_on_merge` | `true` | Whether to close the item when its pull request is merged. With it off the item keeps its `worc:done` label, and **GitHub closes it instead**: the generated task carries `references: ["Fixes #<n>"]`, which worc appends to the pull-request body, so merging into the default branch closes the issue with the code host's own link between the two. Against a worc older than 0.14.0a1 there is no such key, and the item then simply stays open for you to close. |
 
 The item is the visible state machine, and the connector reads it back before every write: the state it shows decides whether anything is written at all. That is what makes a deleted `state.db` safe — the label says how far the item got — and what makes a tick with nothing new write nothing.
 

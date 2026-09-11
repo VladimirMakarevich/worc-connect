@@ -20,7 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final, Self
 
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
 
 _META_SCHEMA_VERSION: Final = "schema_version"
 
@@ -32,20 +32,21 @@ META_LAST_TICK_RESULT: Final = "last_tick_result"
 
 _SCHEMA: Final = """
 CREATE TABLE items (
-    tracker         TEXT    NOT NULL,
-    item_id         TEXT    NOT NULL,
-    seq             INTEGER NOT NULL,
-    task_id         TEXT    UNIQUE,
-    branch          TEXT,
-    phase           TEXT    NOT NULL,
-    item_updated_at TEXT,
-    last_status     TEXT,
-    pr_number       INTEGER,
-    pr_url          TEXT,
-    pr_merged       INTEGER NOT NULL DEFAULT 0,
-    retrigger_armed INTEGER NOT NULL DEFAULT 0,
-    created_at      TEXT    NOT NULL,
-    updated_at      TEXT    NOT NULL,
+    tracker           TEXT    NOT NULL,
+    item_id           TEXT    NOT NULL,
+    seq               INTEGER NOT NULL,
+    task_id           TEXT    UNIQUE,
+    branch            TEXT,
+    phase             TEXT    NOT NULL,
+    item_updated_at   TEXT,
+    last_status       TEXT,
+    validation_reason TEXT,
+    pr_number         INTEGER,
+    pr_url            TEXT,
+    pr_merged         INTEGER NOT NULL DEFAULT 0,
+    retrigger_armed   INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT    NOT NULL,
+    updated_at        TEXT    NOT NULL,
     PRIMARY KEY (tracker, item_id, seq)
 );
 CREATE TABLE meta (
@@ -93,6 +94,9 @@ class ItemRow:
     branch: str | None = None
     item_updated_at: datetime | None = None
     last_status: str | None = None
+    # The reason worc's validation gate refused the task, as worc published it. Held so the item
+    # can be told why, because a refused task has no worc row of its own to point anybody at.
+    validation_reason: str | None = None
     pr_number: int | None = None
     pr_url: str | None = None
     pr_merged: bool = False
@@ -136,6 +140,7 @@ def _row(record: sqlite3.Row) -> ItemRow:
         branch=record["branch"],
         item_updated_at=_parse(record["item_updated_at"]),
         last_status=record["last_status"],
+        validation_reason=record["validation_reason"],
         pr_number=record["pr_number"],
         pr_url=record["pr_url"],
         pr_merged=bool(record["pr_merged"]),
@@ -215,14 +220,16 @@ class StateStore:
             """
             INSERT INTO items (
                 tracker, item_id, seq, task_id, branch, phase, item_updated_at, last_status,
-                pr_number, pr_url, pr_merged, retrigger_armed, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                validation_reason, pr_number, pr_url, pr_merged, retrigger_armed,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(tracker, item_id, seq) DO UPDATE SET
                 task_id = excluded.task_id,
                 branch = excluded.branch,
                 phase = excluded.phase,
                 item_updated_at = excluded.item_updated_at,
                 last_status = excluded.last_status,
+                validation_reason = excluded.validation_reason,
                 pr_number = excluded.pr_number,
                 pr_url = excluded.pr_url,
                 pr_merged = excluded.pr_merged,
@@ -238,6 +245,7 @@ class StateStore:
                 str(row.phase),
                 _iso(row.item_updated_at),
                 row.last_status,
+                row.validation_reason,
                 row.pr_number,
                 row.pr_url,
                 int(row.pr_merged),

@@ -84,7 +84,7 @@ The shape mirrors worc's own architecture on purpose: a core that knows no exter
 
 ### D13 — v1 closes the item itself; `references:` makes that optional
 
-**Decision.** In v1 the connector closes the issue on merge via `gh issue close --comment`. Once `references:` ships (phase 06), the connector also emits `Fixes #<n>`, and an operator can set `close_on_merge: false` to let GitHub close on merge to the default branch instead.
+**Decision.** In v1 the connector closes the issue on merge via `gh issue close --comment`. Once `references:` ships (phase 06), the connector also emits `Fixes #<n>`, and an operator can set `close_on_merge: false` to let GitHub close on merge to the default branch instead. The closing line is authored by the adapter (`TrackerAdapter.closing_reference`), never by the core, so no core module learns a tracker's keyword; the key is emitted only against a worc that accepts it, which the connector establishes once per process from `worc --version` against a minimum its README names. That handshake is the connector's second and last read out of worc, and it fails closed: an unidentifiable worc gets a task built exactly as it was before the contract.
 
 ### D14 — A published PR is the owner's to edit; the connector only watches it
 

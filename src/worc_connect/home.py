@@ -148,6 +148,9 @@ write_back:
   labels_prefix: "{DEFAULT_LABELS_PREFIX}"
   comment: true
   close_on_merge: true
+  #   Off lets the code host close the item itself: the generated task carries the tracker's own
+  #   closing keyword (`Fixes #<n>` on GitHub) and worc appends it to the pull-request body, so
+  #   merging into the default branch closes the item and the connector only labels it done.
 
 triage:
   enabled: false

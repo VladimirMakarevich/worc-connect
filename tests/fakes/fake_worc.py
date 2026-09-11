@@ -64,6 +64,20 @@ def listing(scenario: dict[str, object]) -> int:
     return 0
 
 
+def version(scenario: dict[str, object]) -> int:
+    """Answer the version handshake the way argparse's own ``--version`` action does.
+
+    A scripted empty string stands for a worc that answers nothing usable, which is the case the
+    connector has to treat as "assume the oldest contract" rather than as a failure.
+    """
+    scripted = scenario.get("version")
+    if isinstance(scripted, dict):
+        sys.stdout.write(str(scripted.get("stdout", "")))
+        return int(scripted.get("exit_code", 0))
+    sys.stdout.write(f"wastech-orchestrator {scripted}\n")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     """Record the call, then answer it; a verb the connector may not use is a loud failure."""
     home = Path(os.environ[HOME_VARIABLE])
@@ -81,6 +95,8 @@ def main(argv: list[str]) -> int:
         return promote(argv, scenario)
     if verb == "list":
         return listing(scenario)
+    if verb == "--version":
+        return version(scenario)
     sys.stderr.write(f"fake worc: the connector may not run `worc {verb}`\n")
     return 1
 

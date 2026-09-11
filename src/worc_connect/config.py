@@ -31,6 +31,16 @@ DEFAULT_LABELS_PREFIX: Final = "worc:"
 DEFAULT_BRANCH_PREFIX: Final = "worc"
 DEFAULT_ID_PREFIX: Final = "gh"
 DEFAULT_WORC_COMMAND: Final = "worc"
+
+# worc's own defaults for the two things the connector has to agree with it about: where the task
+# lifecycle lives, and how large a task file may be. They are stated here rather than read out of
+# worc's home, which the connector never opens — it reaches worc through `worc promote` and
+# `worc list` and through nothing else. An operator who changed either in worc restates it here,
+# and the connector's loader is what tells them the value is out of range.
+DEFAULT_TASKS_DIR: Final = "tasks"
+DEFAULT_MAX_TASK_BYTES: Final = 262_144
+DEFAULT_MAX_TASK_LINES: Final = 5_000
+DEFAULT_MAX_LINE_BYTES: Final = 8_192
 DEFAULT_TRIAGE_FLOW: Final = "issue_triage"
 
 # `OWNER/REPO` exactly: two non-empty segments of the characters a host allows in a namespace or a
@@ -116,10 +126,21 @@ class TaskConfig:
 
 @dataclass(frozen=True)
 class WorcConfig:
-    """How to reach worc: the launcher name to resolve and the clone to run it against."""
+    """How to reach worc: the launcher, the clone, and the two facts both sides must agree on.
+
+    ``tasks_dir`` and the three limits mirror worc's ``paths.tasks_dir`` and ``validation.max_*``.
+    They are configured here, not read from worc's home: the connector's only read out of worc is
+    ``worc list``, and a second read would make its own configuration file an incomplete account of
+    what it does. The defaults are worc's defaults, so an operator who changed neither writes
+    nothing.
+    """
 
     command: str
     repo_path: Path
+    tasks_dir: str
+    max_task_bytes: int
+    max_task_lines: int
+    max_line_bytes: int
 
 
 @dataclass(frozen=True)
@@ -308,18 +329,47 @@ def _task(section: _Section) -> TaskConfig:
     )
 
 
+def is_repo_relative_dir(value: str) -> bool:
+    """Whether ``value`` names a directory inside the clone, on every operating system.
+
+    worc applies this rule to its own ``paths.tasks_dir``; the connector applies it to its copy of
+    the value because that copy becomes a path it writes a task file into. A backslash is refused
+    rather than translated so one configuration file means the same directory on Windows and POSIX.
+    """
+    if not value or "\\" in value or value.startswith("/") or ":" in value:
+        return False
+    return all(part not in {"", ".", ".."} for part in value.split("/"))
+
+
 def _worc(section: _Section, *, clone_root: Path) -> WorcConfig:
     """How to reach worc, with ``repo_path`` resolved and proven to be a directory."""
-    section.reject_unknown("command", "repo_path")
+    section.reject_unknown(
+        "command",
+        "repo_path",
+        "tasks_dir",
+        "max_task_bytes",
+        "max_task_lines",
+        "max_line_bytes",
+    )
     raw_path = section.string("repo_path", ".")
     # Relative to the directory that holds the connector's home, so the documented `.` means "the
     # clone this home sits in" however the operator's shell happened to be positioned.
     repo_path = Path(raw_path) if Path(raw_path).is_absolute() else clone_root / raw_path
     if not repo_path.is_dir():
         raise ConfigError(f"`worc.repo_path` is not a directory: {repo_path.as_posix()}")
+    tasks_dir = section.string("tasks_dir", DEFAULT_TASKS_DIR)
+    if not is_repo_relative_dir(tasks_dir):
+        raise ConfigError(
+            "`worc.tasks_dir` must be a directory inside the clone, written with forward "
+            "slashes and no `..` segment"
+        )
     return WorcConfig(
         command=section.string("command", DEFAULT_WORC_COMMAND),
         repo_path=repo_path.resolve(),
+        tasks_dir=tasks_dir,
+        max_task_bytes=section.positive_int("max_task_bytes", DEFAULT_MAX_TASK_BYTES),
+        max_task_lines=section.positive_int("max_task_lines", DEFAULT_MAX_TASK_LINES),
+        max_line_bytes=section.positive_int("max_line_bytes", DEFAULT_MAX_LINE_BYTES),
     )
 
 

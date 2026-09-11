@@ -34,6 +34,12 @@ dev = [
     "vulture>=2.11",       # dead-code detection
     "deptry>=0.20",        # dependency hygiene
     "types-PyYAML>=6.0",   # stubs for the configuration parser (mypy strict has no untyped imports)
+    # worc itself, as a TEST dependency only: one suite feeds a generated task file to worc's real
+    # validation gate, because the connector has to produce a file worc accepts unchanged and worc
+    # rejects rather than repairs. Nothing under `src/` may import it. It is installed from its
+    # repository because it is not published to an index — the name `worc` on PyPI is an unrelated
+    # project — and the suite that uses it skips where it is absent.
+    "wastech-orchestrator @ git+https://github.com/VladimirMakarevich/wastech-orchestrator.git",
 ]
 
 [project.scripts]

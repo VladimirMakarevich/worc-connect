@@ -21,23 +21,26 @@ import logging
 import os
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Final
 
 from worc_connect.config import ConnectorConfig
-from worc_connect.core import gate
+from worc_connect.core import builder, gate
 from worc_connect.core.items import WorkItem
+from worc_connect.core.reconcile import Reconciler
 from worc_connect.core.state import (
     META_LAST_TICK_AT,
     META_LAST_TICK_RESULT,
+    TERMINAL_PHASES,
     ItemRow,
     Phase,
     StateStore,
     read_watermark,
     write_watermark,
 )
+from worc_connect.core.worc_cli import WorcCommand, WorcUnavailable
 from worc_connect.home import ConnectorHome
 from worc_connect.trackers.base import TrackerAdapter, TrackerError
 
@@ -57,6 +60,11 @@ STOP_POLL_SECONDS: Final = 1.0
 # problem is exit 2 and never reaches this module — the CLI refuses before a loop exists.
 _EXIT_OK: Final = 0
 _EXIT_FAILED: Final = 1
+
+# The phases a re-trigger may start a new attempt from: worc is finished with the task, or has
+# handed it to a pull request the connector is only watching. Anything earlier is still in flight,
+# and a second task for an item already being worked on is exactly what the id rule forbids.
+_RETRIGGERABLE_PHASES: Final = TERMINAL_PHASES | {Phase.PR_OPEN}
 
 
 class Action(StrEnum):
@@ -79,6 +87,8 @@ class PlannedAction:
     url: str
     action: Action
     reason: str
+    task_id: str | None = None
+    branch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +122,7 @@ class Watcher:
     adapter: TrackerAdapter
     store: StateStore
     home: ConnectorHome
+    worc: WorcCommand
     on_tick: Callable[[TickReport], None] = lambda report: None
     now_fn: Callable[[], datetime] = _utc_now
     sleep_fn: Callable[[float], None] = time.sleep
@@ -125,13 +136,18 @@ class Watcher:
     def tick(self, *, dry_run: bool) -> TickReport:
         """One pass over the items the tracker reports as changed.
 
-        Raises :class:`~worc_connect.trackers.base.TrackerError` when the tracker cannot be read:
-        the caller decides whether that ends the process or costs one tick, and either way no state
-        has changed by then — the listing is the first thing the tick does.
+        Raises :class:`~worc_connect.trackers.base.TrackerError` when the tracker cannot be read
+        and :class:`~worc_connect.core.worc_cli.WorcUnavailable` when worc cannot be: the caller
+        decides whether that ends the process or costs one tick. Either way no row is moved on a
+        guess — a step that cannot read its source leaves the row where it was, and the next tick
+        is the retry.
         """
         now = self.now_fn()
         items = self.adapter.list_items(self._listing_floor())
-        actions = tuple(self._plan(item, dry_run=dry_run, now=now) for item in items)
+        reconciler = Reconciler(config=self.config, store=self.store, worc=self.worc)
+        actions = tuple(
+            self._plan(item, reconciler=reconciler, dry_run=dry_run, now=now) for item in items
+        )
         watermark = self._advance_watermark(items, dry_run=dry_run)
         report = TickReport(listed=len(items), actions=actions, watermark=watermark)
         if not dry_run:
@@ -139,10 +155,10 @@ class Watcher:
         return report
 
     def _single_pass(self, *, dry_run: bool) -> int:
-        """One tick, reporting an unreachable tracker as a failed run rather than as a retry."""
+        """One tick; an unreachable tracker or worc ends the run rather than becoming a retry."""
         try:
             report = self.tick(dry_run=dry_run)
-        except TrackerError as exc:
+        except (TrackerError, WorcUnavailable) as exc:
             self._note_failure(exc, dry_run=dry_run)
             return _EXIT_FAILED
         self.on_tick(report)
@@ -171,7 +187,7 @@ class Watcher:
         """One tick whose infrastructure failure is logged and retried on the next one."""
         try:
             report = self.tick(dry_run=dry_run)
-        except TrackerError as exc:
+        except (TrackerError, WorcUnavailable) as exc:
             self._note_failure(exc, dry_run=dry_run)
             return
         self.on_tick(report)
@@ -181,38 +197,113 @@ class Watcher:
         watermark = read_watermark(self.store)
         return None if watermark is None else watermark - WATERMARK_OVERLAP
 
-    def _plan(self, item: WorkItem, *, dry_run: bool, now: datetime) -> PlannedAction:
-        """Decide — and, unless this is a dry run, record — what happens to one item."""
+    def _plan(
+        self, item: WorkItem, *, reconciler: Reconciler, dry_run: bool, now: datetime
+    ) -> PlannedAction:
+        """Decide — and, unless this is a dry run, carry out — what happens to one item."""
         verdict = gate.evaluate(item, self.config.gate)
         row = self.store.latest_row(self.config.tracker, item.identifier)
-        if row is not None:
-            return self._follow(item, row, verdict_admitted=verdict.admitted)
+        if row is not None and not self._is_retrigger(row, admitted=verdict.admitted):
+            return self._follow(
+                item,
+                row,
+                reconciler=reconciler,
+                admitted=verdict.admitted,
+                dry_run=dry_run,
+                now=now,
+            )
         if not verdict.admitted:
             _log(item, None, Action.SKIP, str(verdict.reason))
             return PlannedAction(item.identifier, item.url, Action.SKIP, str(verdict.reason))
-        if not dry_run:
-            self.store.save(self._first_row(item, now=now))
-        _log(item, None, Action.STAGE, str(verdict.reason))
-        return PlannedAction(item.identifier, item.url, Action.STAGE, str(verdict.reason))
+        seq = 1 if row is None else row.seq + 1
+        return self._take_on(
+            item,
+            seq=seq,
+            reason=str(verdict.reason),
+            reconciler=reconciler,
+            dry_run=dry_run,
+            now=now,
+        )
 
-    def _follow(self, item: WorkItem, row: ItemRow, *, verdict_admitted: bool) -> PlannedAction:
-        """Report an item that already has a row; its task belongs to worc from here on.
+    @staticmethod
+    def _is_retrigger(row: ItemRow, *, admitted: bool) -> bool:
+        """Whether this sighting starts a **new** attempt at an item the connector already handled.
+
+        Only a row that is finished — or waiting on a pull request, which worc is done with — can
+        be re-triggered, and only once the connector has seen the thing that makes a later trigger
+        a fresh request rather than the same one still standing: the label taken off, or the item
+        closed by the connector itself. An id is never reused, so the new attempt gets the next
+        sequence number.
+        """
+        return admitted and row.retrigger_armed and row.phase in _RETRIGGERABLE_PHASES
+
+    def _take_on(
+        self,
+        item: WorkItem,
+        *,
+        seq: int,
+        reason: str,
+        reconciler: Reconciler,
+        dry_run: bool,
+        now: datetime,
+    ) -> PlannedAction:
+        """Record attempt ``seq`` at ``item`` and hand it over, or describe that for a dry run."""
+        row = self._new_row(item, seq=seq, now=now)
+        if dry_run:
+            # The builder is pure, so the plan can name the id and the branch the real tick would
+            # allocate without anything being written anywhere.
+            draft = builder.build(item, self.config, seq=seq)
+            _log(item, draft.task_id, Action.STAGE, reason)
+            return PlannedAction(
+                item.identifier, item.url, Action.STAGE, reason, draft.task_id, draft.branch
+            )
+        self.store.save(row)
+        staged = reconciler.advance(row, item, now=now)
+        _log(item, staged.task_id, Action.STAGE, reason)
+        return PlannedAction(
+            item.identifier, item.url, Action.STAGE, reason, staged.task_id, staged.branch
+        )
+
+    def _follow(
+        self,
+        item: WorkItem,
+        row: ItemRow,
+        *,
+        reconciler: Reconciler,
+        admitted: bool,
+        dry_run: bool,
+        now: datetime,
+    ) -> PlannedAction:
+        """Follow an item that already has a row; its task belongs to worc from here on.
 
         A trigger label taken off afterwards does not withdraw the task — it is worc's now, and
-        cancelling a run from a label would make a queue an operator cannot reason about — so the
-        withdrawal is logged and nothing else happens.
+        cancelling a run from a label would make a queue an operator cannot reason about. What the
+        withdrawal does do is arm the next re-application of the label as a new request.
         """
-        if not verdict_admitted:
+        if not admitted:
             _log(item, row.task_id, Action.FOLLOW, "gate-withdrawn")
+            row = self._arm_retrigger(row, dry_run=dry_run, now=now)
+        if not dry_run:
+            row = reconciler.advance(row, item, now=now)
         _log(item, row.task_id, Action.FOLLOW, str(row.phase))
-        return PlannedAction(item.identifier, item.url, Action.FOLLOW, str(row.phase))
+        return PlannedAction(
+            item.identifier, item.url, Action.FOLLOW, str(row.phase), row.task_id, row.branch
+        )
 
-    def _first_row(self, item: WorkItem, *, now: datetime) -> ItemRow:
-        """The row an admitted item gets on the tick that first admits it."""
+    def _arm_retrigger(self, row: ItemRow, *, dry_run: bool, now: datetime) -> ItemRow:
+        """Record that the trigger was withdrawn, so re-applying it later starts a new attempt."""
+        if row.retrigger_armed or dry_run:
+            return row
+        armed = replace(row, retrigger_armed=True, updated_at=now)
+        self.store.save(armed)
+        return armed
+
+    def _new_row(self, item: WorkItem, *, seq: int, now: datetime) -> ItemRow:
+        """The row attempt ``seq`` at an admitted item starts from."""
         return ItemRow(
             tracker=self.config.tracker,
             item_id=item.identifier,
-            seq=1,
+            seq=seq,
             phase=Phase.GATED,
             created_at=now,
             updated_at=now,
@@ -240,7 +331,7 @@ class Watcher:
         self.store.set_meta(META_LAST_TICK_AT, now.astimezone(UTC).isoformat())
         self.store.set_meta(META_LAST_TICK_RESULT, result)
 
-    def _note_failure(self, exc: TrackerError, *, dry_run: bool) -> None:
+    def _note_failure(self, exc: Exception, *, dry_run: bool) -> None:
         """Log an infrastructure failure by class and leave every row untouched."""
         logger.warning("item=- task=- action=list result=skipped-%s (%s)", type(exc).__name__, exc)
         if not dry_run:

@@ -1,0 +1,114 @@
+"""The generated task file, judged by worc's own validation gate rather than by our reading of it.
+
+The connector has to produce a file worc accepts unchanged, and worc rejects rather than repairs:
+a title carrying an argv-shaped token, a body over one of three size limits, or a front-matter key
+worc does not allow all end the same way — the task is quarantined inside worc's private home,
+where the connector is not allowed to look, so from outside it simply vanishes.
+
+That is too important to check against a second, local copy of worc's rules, which could drift from
+the real ones without anything failing. These tests run the real gate.
+"""
+
+from __future__ import annotations
+
+from importlib import resources
+from pathlib import Path
+
+import pytest
+
+from support import connector_config, requires_worc, task_config, work_item
+from worc_connect.core import builder
+
+pytestmark = requires_worc
+
+# A title made of every token worc's front-matter scan refuses, led by the one that makes a value
+# look like a command-line flag.
+HOSTILE_TITLE = "-rm -rf /; echo | $(whoami)"
+
+
+@pytest.fixture
+def gate() -> object:
+    """worc's validation gate, configured exactly as a fresh `worc install` configures it."""
+    from wastech_orchestrator.config.loader import loads_config
+    from wastech_orchestrator.task.validation_gate import ValidationGate
+
+    text = (
+        resources.files("wastech_orchestrator")
+        .joinpath("packaged", "config.example.yaml")
+        .read_text(encoding="utf-8")
+    )
+    return ValidationGate(
+        loads_config(text).config,
+        store_has_task_id=lambda _id: False,
+        ledger_has_task_id=lambda _id: False,
+    )
+
+
+def judge(gate: object, content: str) -> object:
+    """Run the gate over ``content`` as though it had just been promoted."""
+    from wastech_orchestrator.task.parser import ParsedSource
+
+    source = ParsedSource(path="task.md", suffix=".md", raw_bytes=content.encode("utf-8"))
+    return gate.validate(source)  # type: ignore[attr-defined]
+
+
+def test_a_hostile_item_still_produces_a_task_worc_accepts(gate: object, clone: Path) -> None:
+    # 300 000 bytes with one 10 000-byte line: over the byte limit, over the per-line limit, and
+    # carrying every token the injection scan refuses in its title.
+    item = work_item(
+        title=HOSTILE_TITLE,
+        body="\n".join(["x" * 10_000, *["padding line"] * 20_000]),
+    )
+    config = connector_config(
+        clone,
+        task=task_config(
+            task_type="implementation", queue="default", priority="mid", commit_type="feat"
+        ),
+    )
+
+    result = judge(gate, builder.build(item, config, seq=1).content)
+
+    assert result.passed is True, f"{result.reason}: {result.detail}"  # type: ignore[attr-defined]
+
+
+def test_a_title_that_sanitizes_to_nothing_still_passes(gate: object, clone: Path) -> None:
+    item = work_item(title=";;; ``` |||")
+
+    result = judge(gate, builder.build(item, connector_config(clone), seq=1).content)
+
+    assert result.passed is True, f"{result.reason}: {result.detail}"  # type: ignore[attr-defined]
+    assert result.normalized.title == "Issue #142"  # type: ignore[attr-defined]
+
+
+def test_a_re_triggered_task_continuing_a_branch_passes(gate: object, clone: Path) -> None:
+    draft = builder.build(
+        work_item(), connector_config(clone), seq=2, branch_ref="worc/gh-142-first-try"
+    )
+
+    result = judge(gate, draft.content)
+
+    assert result.passed is True, f"{result.reason}: {result.detail}"  # type: ignore[attr-defined]
+    assert draft.task_id == "gh-142.2"
+
+
+def test_the_builders_key_set_is_a_strict_subset_of_the_keys_worc_allows() -> None:
+    from wastech_orchestrator.task.model import ALLOWED_TASK_KEYS
+
+    assert builder.ALLOWED_KEYS < ALLOWED_TASK_KEYS
+
+
+def test_the_builder_can_never_emit_a_key_that_changes_how_a_task_runs() -> None:
+    forbidden = {"nodes", "subtasks", "decomposition", "trust_level", "prompt_audit", "publish"}
+
+    assert not builder.ALLOWED_KEYS & forbidden
+
+
+def test_the_branch_the_connector_names_is_the_one_worc_will_use(clone: Path) -> None:
+    from wastech_orchestrator.task.model import BRANCH_NAME_MAX_LEN, is_valid_branch_name
+
+    draft = builder.build(work_item(title="a " * 200), connector_config(clone), seq=1)
+
+    # Over worc's soft cap it would discard the name and generate its own, which the connector
+    # could then not find the pull request by.
+    assert len(draft.branch) <= BRANCH_NAME_MAX_LEN
+    assert is_valid_branch_name(draft.branch)

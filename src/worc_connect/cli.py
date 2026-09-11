@@ -32,6 +32,7 @@ from worc_connect.core.state import (
     ItemRow,
     StateStore,
 )
+from worc_connect.core.worc_cli import WorcCommand
 from worc_connect.home import HOME_DIRNAME, ConnectorHome, ensure_gitignore_entry, render_config
 from worc_connect.trackers.base import AdapterFactory, TrackerAdapter
 
@@ -149,6 +150,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
             adapter=adapter,
             store=store,
             home=home,
+            worc=WorcCommand(command=config.worc.command, repo_path=config.worc.repo_path),
             on_tick=_reporter(config, dry_run=args.dry_run),
         )
         return watcher.run(once=args.once, dry_run=args.dry_run)
@@ -245,7 +247,8 @@ def _reporter(config: ConnectorConfig, *, dry_run: bool) -> Callable[[TickReport
         for planned in tick.actions:
             print(
                 f"plan: item={planned.item_id} action={planned.action} "
-                f"reason={planned.reason} url={planned.url}"
+                f"reason={planned.reason} task={planned.task_id or '-'} "
+                f"branch={planned.branch or '-'} url={planned.url}"
             )
         print(f"plan: watermark={tick.watermark.isoformat() if tick.watermark else '-'}")
 

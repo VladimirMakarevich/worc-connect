@@ -154,7 +154,7 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 - **AC-E5** — the item loses the trigger label while `queued` → nothing changes on the task; a log line notes it.
 - **AC-E6** — the watermark is ahead of an item's `updatedAt` because of clock skew inside the overlap window → the item is still listed and, having a row, is not duplicated.
 - **AC-E7** — `.worc-connect/connect.stop` appears mid-sleep → the loop exits before the next tick and removes its PID file.
-- **AC-E8** — `tasks/preparing/` does not exist → the connector creates it under `paths.tasks_dir` as read from worc's `config.yaml` (or the default `tasks`), then proceeds.
+- **AC-E8** — `tasks/preparing/` does not exist → the connector creates it under the configured `worc.tasks_dir` (default `tasks`, worc's own default), then proceeds.
 - **AC-E9** — the PR is closed without merge, then reopened → the row goes `failed` with one comment, then back to `pr-open` on the next tick that sees `state: OPEN`; no second failure comment is posted for the same closure.
 
 ## Non-functional checks

@@ -31,6 +31,10 @@ task:
 worc:
   command: worc
   repo_path: .
+  tasks_dir: tasks
+  max_task_bytes: 262144
+  max_task_lines: 5000
+  max_line_bytes: 8192
 
 write_back:
   labels_prefix: "worc:"
@@ -86,8 +90,38 @@ A key left out here is a key the generated task file does not carry, so worc's o
 | --- | --- | --- |
 | `command` | `worc` | The launcher to resolve on `PATH`. Resolution handles a Windows `.exe` / `.cmd`, and the command is always launched as an argument list, never through a shell. |
 | `repo_path` | `.` | The clone worc runs in, relative to the directory that holds the connector's home. Refused if it is not a directory. |
+| `tasks_dir` | `tasks` | worc's own `paths.tasks_dir`. The connector stages the task file in `<tasks_dir>/preparing/` and reads `<tasks_dir>/pending/` to tell a promoted task from a vanished one. Must be a directory inside the clone, written with forward slashes and no `..` segment. |
+| `max_task_bytes` | `262144` | worc's `validation.max_task_bytes`. The generated file is truncated to fit, with a visible marker and the item's URL. |
+| `max_task_lines` | `5000` | worc's `validation.max_task_lines`, applied the same way. |
+| `max_line_bytes` | `8192` | worc's `validation.max_line_bytes`, applied per line. |
 
-The connector's only write into that clone is a task file in `tasks/preparing/`, promoted with `worc promote`; its only read out of worc is `worc list --format json`. It never runs `git` there and never touches `.worc/`.
+The connector's only write into that clone is a task file in `<tasks_dir>/preparing/`, promoted with `worc promote`; its only read out of worc is `worc list --format json --all`. It never runs `git` there and never touches `.worc/` — **including worc's own `config.yaml`**, which is why the last four keys exist. If you changed `paths.tasks_dir` or any `validation.max_*` in worc, restate the value here: the connector cannot see it, and the mismatch would surface as a task worc never queues or a file its gate quarantines.
+
+## The task file the connector generates
+
+```markdown
+---
+id: gh-142
+title: "Signup form accepts foo@ as an email"
+branch_name: worc/gh-142-signup-form-accepts-foo-as-an-email
+priority: mid
+queue: default
+commit_type: fix
+---
+
+## Description
+
+Source: github item #142 by @reporter — https://github.com/OWNER/REPO/issues/142
+
+<the item's text, verbatim, truncated with a marker if it is over one of the limits above>
+```
+
+- **The id** is `<id_prefix>-<item number>`, and `<id_prefix>-<item number>.<n>` for every later attempt at the same item. An id is never reused.
+- **The title** is the item's, with whitespace collapsed and every control character, newline, `;`, backtick, `|` and `$(` removed, capped at 120 characters, and with every leading `-` stripped — worc's front-matter scan refuses all of those, and a refusal quarantines the task inside `.worc/`, where the connector may not look. An item whose title survives none of that is titled `Issue #<n>`.
+- **The branch** is `<branch_prefix>/<task id>-<slug>`, at most 50 characters: above that worc discards the name and generates its own, which the connector could then not find the pull request by. It always carries the `<branch_prefix>/` segment, so it can never collide with a base branch.
+- **The body** is the item's text, verbatim, under one provenance line. No acceptance criteria are invented for an item that carries none — enriching a thin report is worc's refinement step, not the connector's guess.
+- **A follow-up on an item whose previous pull request is still open** carries `branch_mode: existing` and `branch_ref` instead of `branch_name`, so worc continues that branch and appends to that pull request.
+- **Nothing else is emitted.** The key set is a strict subset of worc's allowed keys and can never include `nodes`, `subtasks`, `decomposition`, `trust_level`, `prompt_audit` or `publish`: a task file the connector writes cannot change how worc runs it.
 
 ## `write_back` — what appears on the item
 

@@ -7,6 +7,7 @@ import for the tests and for ``conftest``.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import stat
@@ -34,6 +35,8 @@ from worc_connect.trackers.base import TrackerUnavailable
 
 FAKES = Path(__file__).resolve().parent / "fakes"
 FAKE_GH_SCRIPT = FAKES / "fake_gh.py"
+FAKE_WORC_SCRIPT = FAKES / "fake_worc.py"
+FAKE_GIT_SCRIPT = FAKES / "fake_git.py"
 
 ISSUE_FIELDS = "number,title,body,author,labels,updatedAt,url"
 
@@ -57,6 +60,22 @@ requires_installed_distribution = pytest.mark.skipif(
 )
 
 
+def _worc_is_importable() -> bool:
+    """Whether worc itself can be imported here, so its real gate can judge a generated file."""
+    return importlib.util.find_spec("wastech_orchestrator") is not None
+
+
+# worc is a *test* dependency (declared in the `dev` extra, installed from its repository): the
+# connector must never import it at runtime, and the one assertion worth making against the real
+# thing is that a file the builder produced passes worc's own validation gate unchanged. A dev
+# virtualenv and CI both install it; the bare environment pre-commit builds to lint the tree does
+# not, and saying so beats reimplementing the gate to have something to assert against.
+requires_worc = pytest.mark.skipif(
+    not _worc_is_importable(),
+    reason='worc is not installed here: run `pip install -e ".[dev]"` to include these',
+)
+
+
 def base_config(*, repo: str = "OWNER/REPO") -> dict[str, Any]:
     """A configuration the loader accepts, as a mapping tests edit before writing it out."""
     return {
@@ -66,7 +85,7 @@ def base_config(*, repo: str = "OWNER/REPO") -> dict[str, Any]:
         "poll_interval_seconds": 300,
         "gate": {"labels": ["worc"], "authors": [], "allow_all": False},
         "task": {"branch_prefix": "worc", "id_prefix": "gh"},
-        "worc": {"command": "worc", "repo_path": "."},
+        "worc": {"command": "worc", "repo_path": ".", "tasks_dir": "tasks"},
         "write_back": {"labels_prefix": "worc:", "comment": True, "close_on_merge": True},
         "triage": {"enabled": False, "flow": "issue_triage"},
     }
@@ -160,6 +179,54 @@ def _verb_of(argv: list[str]) -> str:
     return " ".join(argument for argument in argv[:2] if not argument.startswith("-"))
 
 
+@dataclass
+class FakeWorc:
+    """A handle on the fake worc: what it will answer, and what it was asked."""
+
+    home: Path
+    bin_dir: Path
+    _scenario: dict[str, Any] = field(default_factory=lambda: {"tasks_dir": "tasks"})
+
+    def configure(self, **scenario: Any) -> None:
+        """Set or replace scenario values (``tasks_dir``, ``entries``, ``promote``, ``list``)."""
+        self._scenario.update(scenario)
+        (self.home / "scenario.json").write_text(
+            json.dumps(self._scenario), encoding="utf-8", newline=""
+        )
+
+    def entries(self, **statuses: str) -> None:
+        """Script ``worc list --format json`` as one entry per ``task_id=status`` pair."""
+        self.configure(
+            entries=[
+                {"task_id": task_id, "status": status, "title": None, "branch": None}
+                for task_id, status in statuses.items()
+            ]
+        )
+
+    @property
+    def calls(self) -> list[list[str]]:
+        """Every argument list the connector launched worc with, in order."""
+        path = self.home / "calls.jsonl"
+        if not path.is_file():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+@dataclass
+class FakeGit:
+    """A handle on the recording ``git``: what, if anything, the connector tried to run."""
+
+    home: Path
+
+    @property
+    def calls(self) -> list[list[str]]:
+        """Every argument list git was launched with — which must always be none of them."""
+        path = self.home / "calls.jsonl"
+        if not path.is_file():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
 def install_launcher(bin_dir: Path, name: str, script: Path) -> None:
     """Put a runnable executable called ``name`` on disk that runs ``script``.
 
@@ -178,6 +245,30 @@ def install_launcher(bin_dir: Path, name: str, script: Path) -> None:
     launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def task_config(
+    *,
+    task_type: str | None = None,
+    queue: str | None = None,
+    priority: str | None = None,
+    commit_type: str | None = None,
+    commit_type_by_label: dict[str, str] | None = None,
+    branch_prefix: str = "worc",
+    id_prefix: str = "gh",
+    auto_merge: bool | None = None,
+) -> TaskConfig:
+    """The dispatch fields of a generated task, with nothing emitted unless a test asks for it."""
+    return TaskConfig(
+        task_type=task_type,
+        queue=queue,
+        priority=priority,
+        commit_type=commit_type,
+        commit_type_by_label=commit_type_by_label or {},
+        branch_prefix=branch_prefix,
+        id_prefix=id_prefix,
+        auto_merge=auto_merge,
+    )
+
+
 def connector_config(
     clone: Path,
     *,
@@ -187,6 +278,11 @@ def connector_config(
     labels: tuple[str, ...] = ("worc",),
     authors: tuple[str, ...] = (),
     allow_all: bool = False,
+    task: TaskConfig | None = None,
+    tasks_dir: str = "tasks",
+    max_task_bytes: int = 262_144,
+    max_task_lines: int = 5_000,
+    max_line_bytes: int = 8_192,
 ) -> ConnectorConfig:
     """A validated configuration built directly, for tests that are not about the loader."""
     return ConnectorConfig(
@@ -195,17 +291,15 @@ def connector_config(
         repo=repo,
         poll_interval_seconds=poll_interval_seconds,
         gate=GateConfig(labels=labels, authors=authors, allow_all=allow_all),
-        task=TaskConfig(
-            task_type=None,
-            queue=None,
-            priority=None,
-            commit_type=None,
-            commit_type_by_label={},
-            branch_prefix="worc",
-            id_prefix="gh",
-            auto_merge=None,
+        task=task or task_config(),
+        worc=WorcConfig(
+            command="worc",
+            repo_path=clone,
+            tasks_dir=tasks_dir,
+            max_task_bytes=max_task_bytes,
+            max_task_lines=max_task_lines,
+            max_line_bytes=max_line_bytes,
         ),
-        worc=WorcConfig(command="worc", repo_path=clone),
         write_back=WriteBackConfig(labels_prefix="worc:", comment=True, close_on_merge=True),
         triage=TriageConfig(enabled=False, flow="issue_triage"),
     )

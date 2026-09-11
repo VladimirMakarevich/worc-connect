@@ -1,0 +1,16 @@
+# worc itself, as a test dependency of this repository.
+#
+# One suite feeds a task file the builder generated to worc's *real* validation gate, because the
+# connector has to produce a file worc accepts unchanged and worc rejects rather than repairs — a
+# second, local copy of its rules could drift from the real ones without anything failing.
+#
+# It is not in `pyproject.toml`, and that is deliberate: worc is published to no package index (the
+# name `worc` on PyPI is an unrelated project), so it can only be named by URL, and a direct
+# reference inside the project's metadata is refused both by hatchling's default settings and by
+# every package index this connector might later be published to. Nothing under `src/` imports it,
+# so it is not a dependency of the product in any sense — only of one test.
+#
+#     pip install -r requirements-worc.txt
+#
+# Without it, `tests/test_worc_gate.py` skips and the rest of the suite is unaffected.
+wastech-orchestrator @ git+https://github.com/VladimirMakarevich/wastech-orchestrator.git

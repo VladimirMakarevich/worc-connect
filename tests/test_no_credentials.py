@@ -26,9 +26,11 @@ from worc_connect.trackers.github.gh import GhCommand
 
 SECRET_WORDS = ("token", "secret", "password", "credential", "api_key", "access_key")
 
-# A launcher on POSIX is a shell shim, and `sh` maintains these itself. They are the shell's
-# bookkeeping, not something the connector put there — which is exactly what the assertion is about.
-SHELL_BOOKKEEPING = frozenset({"PWD", "OLDPWD", "SHLVL", "_"})
+# A launcher is a shell shim on both families — a `sh` script on POSIX, a `.cmd` on Windows — and
+# each shell maintains its own bookkeeping in the environment it passes on. That is the shell's
+# doing, not the connector's, which is exactly what the assertion is about. Windows additionally
+# carries per-drive current-directory variables whose names begin with `=`.
+SHELL_BOOKKEEPING = frozenset({"PWD", "OLDPWD", "SHLVL", "_", "PROMPT"})
 
 
 @pytest.mark.parametrize(
@@ -58,7 +60,7 @@ def added_by(child: dict[str, str]) -> dict[str, str]:
     return {
         key: value
         for key, value in child.items()
-        if key not in SHELL_BOOKKEEPING and parent.get(key) != value
+        if key not in SHELL_BOOKKEEPING and not key.startswith("=") and parent.get(key) != value
     }
 
 

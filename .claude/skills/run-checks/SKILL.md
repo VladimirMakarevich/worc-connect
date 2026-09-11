@@ -9,7 +9,7 @@ Run the full set of checks for the worc-connect repository.
 
 ## Steps
 
-1. Make sure the environment is installed (`pip install -e ".[dev]"`); if dependencies are missing, install them.
+1. Make sure the environment is installed (`pip install -e ".[dev]"`, plus `pip install -r requirements-worc.txt` for the suite that runs a generated task file through worc's real validation gate); if dependencies are missing, install them.
 2. Run the following in order and collect the result of each command:
    ```bash
    ruff check .

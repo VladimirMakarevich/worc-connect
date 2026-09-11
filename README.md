@@ -85,11 +85,14 @@ The rules every coding agent (and every human) follows here are in [AGENTS.md](A
 ```bash
 python -m venv .venv && . .venv/bin/activate    # PowerShell: .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
+pip install -r requirements-worc.txt            # worc itself, for the one suite that needs it
 pre-commit install && pre-commit install --hook-type pre-push
 ruff check . && ruff format --check . && mypy src && lint-imports && python tools/size_gate.py && pytest
 ```
 
 Windows, macOS and Linux are all release targets; the test suite runs natively on all three in CI and never launches the real `gh` or `worc` — every integration test drives a fake executable, so the suite needs no network and no credential.
+
+The second install is worc itself, and it is a **test** dependency: one suite feeds a generated task file to worc's real validation gate, because the connector has to produce a file worc accepts unchanged and worc rejects rather than repairs. Nothing under `src/` imports it, which is why it is not in `pyproject.toml` — worc is published to no package index, and a direct reference in the project's own metadata is refused by the build backend and by every index. Skip it and that suite skips with a note; the rest of the suite is unaffected.
 
 ## License
 

@@ -71,14 +71,15 @@ def _worc_is_importable() -> bool:
     return importlib.util.find_spec("wastech_orchestrator") is not None
 
 
-# worc is a *test* dependency (declared in the `dev` extra, installed from its repository): the
+# worc is a *test* dependency, installed from its repository rather than from an index: the
 # connector must never import it at runtime, and the one assertion worth making against the real
-# thing is that a file the builder produced passes worc's own validation gate unchanged. A dev
-# virtualenv and CI both install it; the bare environment pre-commit builds to lint the tree does
-# not, and saying so beats reimplementing the gate to have something to assert against.
+# thing is that a file the builder produced passes worc's own validation gate unchanged. CI installs
+# it and so does a developer who ran the second install command; the bare environment pre-commit
+# builds to lint the tree does not, and saying so beats reimplementing the gate to have something to
+# assert against.
 requires_worc = pytest.mark.skipif(
     not _worc_is_importable(),
-    reason='worc is not installed here: run `pip install -e ".[dev]"` to include these',
+    reason="worc is not installed here: `pip install -r requirements-worc.txt` to include these",
 )
 
 

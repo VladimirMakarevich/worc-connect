@@ -2,7 +2,7 @@
 
 You are working on **worc-connect** — the tracker connector for [wastech-orchestrator](https://github.com/VladimirMakarevich/wastech-orchestrator) (`worc`). It polls an issue tracker for one repository, turns each work item a maintainer has explicitly gated into a worc task through the ingress worc already has (`tasks/preparing/` + `worc promote`), and writes the outcome back to the tracker: a state label, a comment naming the task, the pull-request link, the close on merge. GitHub is the first tracker, driven through the operator's own `gh` login. The core knows no tracker API; every tracker is one adapter behind an optional dependency, discovered through the `worc_connect.trackers` entry-point group.
 
-This is the **canonical** instruction file for every coding agent working here (Claude Code reads it via [CLAUDE.md](CLAUDE.md)). The full set of rules lives in **[.agents/rules/](.agents/rules/)**. Below is the gist — the rules and the code are the source of truth. The design record (problem, requirements, design decisions, acceptance criteria, the phased plan) is the `tracker-connector` folder in the orchestrator repository's backlog until phase 03 copies the connector half into `docs/backlog/` here.
+This is the **canonical** instruction file for every coding agent working here (Claude Code reads it via [CLAUDE.md](CLAUDE.md)). The full set of rules lives in **[.agents/rules/](.agents/rules/)**. Below is the gist — the rules and the code are the source of truth. The design record (problem, requirements, design decisions, acceptance criteria, the phased plan) is the `tracker-connector` folder in [docs/backlog/](docs/backlog/README.md); the worc-side phases of that record live in the orchestrator repository's copy of it.
 
 ## Before writing code
 

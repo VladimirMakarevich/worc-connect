@@ -12,8 +12,9 @@ requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Vladimir Makarevich", email = "vladimir.makarevich.23@gmail.com" }]
 # Runtime dependencies join this list together with the code that imports them (deptry fails on a
-# declared-but-unused package). The configuration loader brings PyYAML; nothing else is expected.
-dependencies = []
+# declared-but-unused package). PyYAML is the configuration loader's parser; nothing else is expected
+# — the state store is stdlib sqlite3 and every tracker call is a subprocess, not a client library.
+dependencies = ["PyYAML>=6.0"]
 
 [project.optional-dependencies]
 # Tracker adapters. `gh` is an executable on PATH, not a Python package, so the GitHub extra pins no
@@ -32,10 +33,18 @@ dev = [
     "interrogate>=1.7",    # docstring-coverage threshold
     "vulture>=2.11",       # dead-code detection
     "deptry>=0.20",        # dependency hygiene
+    "types-PyYAML>=6.0",   # stubs for the configuration parser (mypy strict has no untyped imports)
 ]
 
 [project.scripts]
 worc-connect = "worc_connect.cli:main"
+
+# Tracker adapters are discovered, never imported by the core: the composition root looks the
+# configured `tracker` up in this group and calls the factory it finds. An adapter shipped from
+# another distribution registers the same way and needs no change here, which is the whole point of
+# paying the entry-point indirection for a single in-tree adapter today.
+[project.entry-points."worc_connect.trackers"]
+github = "worc_connect.trackers.github:build_adapter"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/worc_connect"]
@@ -146,3 +155,10 @@ ignore_names = ["exc_type", "exc_val", "exc_tb", "tb"]
 # Dependency hygiene (`deptry src`). The dev extra is tooling that src never imports.
 [tool.deptry]
 optional_dependencies_dev_groups = ["dev"]
+
+# deptry infers a distribution's import name from the installed package, and the pre-commit-owned
+# environment that runs this gate installs nothing but deptry itself. Stating the one mapping that
+# is not guessable from the name keeps the gate's verdict identical in a dev venv, in CI and in that
+# bare environment, instead of green where the package happens to be installed and red where it is not.
+[tool.deptry.package_module_name_map]
+PyYAML = ["yaml"]

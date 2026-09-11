@@ -1,6 +1,6 @@
 # Phase 03 — Connector skeleton: core, GitHub adapter (read side), gate, state, dry run
 
-- **Status:** ☐
+- **Status:** ☑ code complete on `feat/connector-skeleton` — the two acceptance lines below stay open until an operator has run the dry run against a real repository and the CI matrix is green
 - **Depends on:** none (runs in the connector repository `VladimirMakarevich/worc-connect`, created empty and private on 2026-09-11; the home is `.worc-connect/` — Q-1 and Q-2 are settled)
 - **Delivers:** FR-C1, FR-C2, FR-C8, FR-C13, FR-C14 — a `worc-connect watch --once --dry-run` that lists the gated items of a real repository and prints what it would do, with the package, gates, config loader, `TrackerAdapter`, `WorkItem`, gate, state store and loop in place.
 
@@ -22,7 +22,9 @@ Stand up the connector repository with its quality gates and the tracker-agnosti
 
 ## Files touched
 
-- connector: `pyproject.toml`, `src/worc_connect/{cli,config}.py`, `src/worc_connect/core/{items,gate,state,loop}.py`, `src/worc_connect/trackers/{base.py,github/}`, `tests/`, CI workflow, `AGENTS.md`, `README.md`.
+- connector: `pyproject.toml` (PyYAML, the `worc_connect.trackers` entry point, `types-PyYAML`), `.importlinter`, `src/worc_connect/{cli,config,home}.py`, `src/worc_connect/core/{items,gate,state,loop}.py`, `src/worc_connect/trackers/{base.py,github/{__init__,gh,adapter}.py}`, `tests/` (fake `gh`, support helpers, seven suites), `README.md`, `docs/configuration.md`, `AGENTS.md`, `.agents/rules/architecture.md`.
+- The repository's gates and CI workflow were already in place from the bootstrap commit, so step 1 only added the entry-point group, the runtime dependency and the tightened import contracts.
+- Two modules are not in the design's layout sketch: `home.py`, split out of `config.py` when the module-size gate made the configuration file the wrong home for the `init` scaffolding, and `trackers/github/gh.py`, which owns launching `gh` and classifying its failures separately from the payload mapping.
 
 ## Invariants in play
 
@@ -46,5 +48,12 @@ Stand up the connector repository with its quality gates and the tracker-agnosti
 
 ## Acceptance for this phase
 
-- [ ] `worc-connect watch --once --dry-run` against a real repository lists the labelled issues and writes nothing.
-- [ ] AC-1, AC-2, AC-8, AC-13, AC-14, AC-E1, AC-E7 pass on Windows and Linux CI.
+- [ ] `worc-connect watch --once --dry-run` against a real repository lists the labelled issues and writes nothing — verified against a fake `gh` in the suite; the run against a real repository needs the operator's own `gh` login.
+- [ ] AC-1, AC-2, AC-8, AC-13, AC-14, AC-E1, AC-E7 pass on Windows and Linux CI — green locally on macOS; the matrix runs when the branch is pushed.
+
+## What the phase actually delivers
+
+- `init` writes `.worc-connect/config.yaml` and gitignores the home; `watch [--once] [--dry-run]` lists, gates and records; `status` reports rows, phases, the watermark and the last tick.
+- The dry run writes **nothing at all** — no task file, no state database, no log, no PID file — and the fake `gh` recording proves no side-effect verb was called.
+- A row is created at phase `gated`; allocating an id, writing the task file and promoting it is the next phase, which picks those rows up.
+- The state store discards a database written by another schema instead of migrating it, because the cache is re-derivable within one tick.

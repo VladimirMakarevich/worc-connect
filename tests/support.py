@@ -24,8 +24,9 @@ import yaml
 from worc_connect.config import (
     ConnectorConfig,
     GateConfig,
+    ResearchConfig,
+    ResearchMode,
     TaskConfig,
-    TriageConfig,
     WorcConfig,
     WriteBackConfig,
 )
@@ -94,12 +95,27 @@ def _worc_allows_references() -> bool:
     return "references" in ALLOWED_TASK_KEYS
 
 
+def _worc_knows_report_dir() -> bool:
+    """Whether the installed worc's flow schema carries the ``report_dir`` key the flow declares."""
+    if not _worc_is_importable():
+        return False
+    from dataclasses import fields
+
+    from wastech_orchestrator.core.flow.schema import FlowDoc
+
+    return any(field.name == "report_dir" for field in fields(FlowDoc))
+
+
 # The contract is pinned in `requirements-worc.txt`, but an older worc installed by hand would make
-# the gate judge a generated file against rules it has never heard of. That is a skip with a reason,
-# not a failure — the same shape as `requires_worc` one line up.
+# these suites judge what the connector produces against rules it has never heard of. That is a skip
+# with a reason, not a failure — the same shape as `requires_worc` one line up.
 requires_worc_references = pytest.mark.skipif(
     not _worc_allows_references(),
     reason="the installed worc predates `references:`: reinstall from requirements-worc.txt",
+)
+requires_worc_report_dir = pytest.mark.skipif(
+    not _worc_knows_report_dir(),
+    reason="the installed worc predates `flow.report_dir`: reinstall from requirements-worc.txt",
 )
 
 
@@ -114,7 +130,7 @@ def base_config(*, repo: str = "OWNER/REPO") -> dict[str, Any]:
         "task": {"branch_prefix": "worc", "id_prefix": "gh"},
         "worc": {"command": "worc", "repo_path": ".", "tasks_dir": "tasks"},
         "write_back": {"labels_prefix": "worc:", "comment": True, "close_on_merge": True},
-        "triage": {"enabled": False, "flow": "issue_triage"},
+        "research": {"mode": "off", "flow": "issue_triage"},
     }
 
 
@@ -302,6 +318,38 @@ def listed_task(
     return entry
 
 
+def report_text(
+    verdict: object,
+    *,
+    reason: str,
+    duplicate_of: str | None = None,
+    acceptance_criteria: tuple[str, ...] = (),
+    failing_test: dict[str, str] | None = None,
+) -> str:
+    """A triage report in the shape the shipped flow instructs the report node to produce.
+
+    Built rather than written out per test so a change to the block's shape is a change in one
+    place — and so the fixture cannot accidentally stop being the shape the prompt asks for.
+    """
+    block: dict[str, Any] = {"verdict": str(verdict), "reason": reason}
+    if duplicate_of is not None:
+        block["duplicate_of"] = duplicate_of
+    if acceptance_criteria:
+        block["acceptance_criteria"] = list(acceptance_criteria)
+    if failing_test is not None:
+        block["failing_test"] = failing_test
+    rendered = yaml.safe_dump(block, sort_keys=False, allow_unicode=True)
+    return f"# Triage\n\nWhat the analysis found.\n\n```worc-connect-triage\n{rendered}```\n"
+
+
+def write_report(home: ConnectorHome, task_id: str, text: str) -> Path:
+    """Put ``text`` where the triage flow's declared report directory would have left it."""
+    path = home.triage_path / task_id / "report.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8", newline="")
+    return path
+
+
 def pull_request(
     number: int = 201,
     *,
@@ -376,6 +424,8 @@ def connector_config(
     max_task_bytes: int = 262_144,
     max_task_lines: int = 5_000,
     max_line_bytes: int = 8_192,
+    research: ResearchMode = ResearchMode.OFF,
+    research_flow: str = "issue_triage",
 ) -> ConnectorConfig:
     """A validated configuration built directly, for tests that are not about the loader."""
     return ConnectorConfig(
@@ -396,7 +446,7 @@ def connector_config(
         write_back=WriteBackConfig(
             labels_prefix=labels_prefix, comment=comment, close_on_merge=close_on_merge
         ),
-        triage=TriageConfig(enabled=False, flow="issue_triage"),
+        research=ResearchConfig(mode=research, flow=research_flow),
     )
 
 

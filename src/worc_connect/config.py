@@ -14,11 +14,18 @@ every section, not just at the top level.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final
+from typing import Final
 
 import yaml
+
+# Re-exported explicitly: the configuration layer is one thing to everybody above it, and its one
+# exception is part of that surface even though the reader and the rules raise it from two files.
+from worc_connect.config_errors import ConfigError as ConfigError
+from worc_connect.config_section import Section
 
 # The one schema version this build understands. A file that declares another one is refused rather
 # than read with today's meaning: the connector's write into worc is a task file, and a
@@ -41,7 +48,7 @@ DEFAULT_TASKS_DIR: Final = "tasks"
 DEFAULT_MAX_TASK_BYTES: Final = 262_144
 DEFAULT_MAX_TASK_LINES: Final = 5_000
 DEFAULT_MAX_LINE_BYTES: Final = 8_192
-DEFAULT_TRIAGE_FLOW: Final = "issue_triage"
+DEFAULT_RESEARCH_FLOW: Final = "issue_triage"
 
 # `OWNER/REPO` exactly: two non-empty segments of the characters a host allows in a namespace or a
 # repository name. The value is pinned onto every tracker call, so a value with a slash too many (or
@@ -64,10 +71,6 @@ _WINDOWS_RESERVED_STEMS: Final = frozenset(
     | {f"COM{digit}" for digit in "123456789"}
     | {f"LPT{digit}" for digit in "123456789"}
 )
-
-
-class ConfigError(Exception):
-    """A configuration the connector refuses to run with; the message names the offending key."""
 
 
 def is_valid_repo(value: str) -> bool:
@@ -152,12 +155,38 @@ class WriteBackConfig:
     close_on_merge: bool
 
 
-@dataclass(frozen=True)
-class TriageConfig:
-    """The optional triage path: off unless the operator turned it on, and then which flow."""
+class ResearchMode(StrEnum):
+    """Who analyses a gated item before it becomes an implementation task, if anybody does.
 
-    enabled: bool
+    ``OFF`` is the default and the whole of phases up to the write-back: the item becomes an
+    implementation task directly. ``WORC`` queues a triage task into worc first and builds the
+    implementation task from the report that task leaves behind. ``LOCAL`` names a research runtime
+    the connector would drive itself, which this build does not have — the loader refuses it rather
+    than quietly doing something else, because an operator who asked for local research and got
+    worc-side triage would be paying for a queue slot they deliberately avoided.
+    """
+
+    OFF = "off"
+    WORC = "worc"
+    LOCAL = "local"
+
+
+#: The modes this build can actually carry out. ``LOCAL`` is a value of the vocabulary and not of
+#: this list on purpose: naming it here is what lets the loader refuse it by name.
+IMPLEMENTED_RESEARCH_MODES: Final = frozenset({ResearchMode.OFF, ResearchMode.WORC})
+
+
+@dataclass(frozen=True)
+class ResearchConfig:
+    """The optional analysis step: off unless the operator turned it on, and then which flow."""
+
+    mode: ResearchMode
     flow: str
+
+    @property
+    def in_worc(self) -> bool:
+        """Whether a gated item becomes a worc triage task before it becomes an implementation."""
+        return self.mode is ResearchMode.WORC
 
 
 @dataclass(frozen=True)
@@ -172,116 +201,10 @@ class ConnectorConfig:
     task: TaskConfig
     worc: WorcConfig
     write_back: WriteBackConfig
-    triage: TriageConfig
+    research: ResearchConfig
 
 
-class _Section:
-    """A typed, key-naming reader over one mapping of the configuration file.
-
-    Every accessor raises :class:`ConfigError` naming the dotted path of the offending key, which
-    is the whole reason the reads go through an object rather than ``dict.get``: an operator who
-    mistypes a key learns which one, and the process stops instead of running with a default nobody
-    chose.
-    """
-
-    def __init__(self, data: Any, prefix: str = "") -> None:
-        if not isinstance(data, dict):
-            raise ConfigError(f"{self._describe(prefix)} must be a mapping")
-        self._data: dict[str, Any] = data
-        self._prefix = prefix
-
-    @staticmethod
-    def _describe(prefix: str) -> str:
-        """How this section is named in an error message."""
-        return f"`{prefix}`" if prefix else "the configuration file"
-
-    def _key(self, name: str) -> str:
-        """The dotted path of ``name`` as the operator wrote it in the file."""
-        return f"{self._prefix}.{name}" if self._prefix else name
-
-    def reject_unknown(self, *known: str) -> None:
-        """Refuse any key this build does not declare, so a typo cannot pass as a default."""
-        for name in sorted(self._data):
-            if name not in known:
-                raise ConfigError(f"unknown configuration key `{self._key(name)}`")
-
-    def section(self, name: str) -> _Section:
-        """A reader over the nested mapping at ``name``; an absent section reads as empty."""
-        return _Section(self._data.get(name, {}), self._key(name))
-
-    def string(self, name: str, default: str | None = None) -> str:
-        """A non-blank string; ``default`` applies when absent, otherwise the key is required."""
-        value = self.optional_string(name)
-        if value is not None:
-            return value
-        if default is None:
-            raise ConfigError(f"`{self._key(name)}` is required")
-        return default
-
-    def optional_string(self, name: str) -> str | None:
-        """A non-blank string, or ``None`` when the key is absent — which means "do not emit it"."""
-        if name not in self._data:
-            return None
-        value = self._data[name]
-        if not isinstance(value, str) or not value.strip():
-            raise ConfigError(f"`{self._key(name)}` must be a non-empty string")
-        return value.strip()
-
-    def flag(self, name: str, default: bool) -> bool:
-        """A boolean; a value that is not a real boolean is an error, never a truthiness test."""
-        value = self.optional_flag(name)
-        return default if value is None else value
-
-    def optional_flag(self, name: str) -> bool | None:
-        """A boolean, or ``None`` when the key is absent."""
-        if name not in self._data:
-            return None
-        value = self._data[name]
-        if not isinstance(value, bool):
-            raise ConfigError(f"`{self._key(name)}` must be true or false")
-        return value
-
-    def positive_int(self, name: str, default: int) -> int:
-        """An integer above zero; a boolean is rejected even though Python counts it as an int."""
-        if name not in self._data:
-            return default
-        value = self._data[name]
-        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-            raise ConfigError(f"`{self._key(name)}` must be a positive integer")
-        return value
-
-    def string_list(self, name: str) -> tuple[str, ...]:
-        """A list of non-blank strings; an absent key reads as the empty list."""
-        if name not in self._data:
-            return ()
-        value = self._data[name]
-        if not isinstance(value, list):
-            raise ConfigError(f"`{self._key(name)}` must be a list of strings")
-        entries: list[str] = []
-        for entry in value:
-            if not isinstance(entry, str) or not entry.strip():
-                raise ConfigError(f"`{self._key(name)}` must contain non-empty strings only")
-            entries.append(entry.strip())
-        return tuple(entries)
-
-    def string_map(self, name: str) -> dict[str, str]:
-        """A mapping of non-blank strings to non-blank strings; an absent key reads as empty."""
-        if name not in self._data:
-            return {}
-        value = self._data[name]
-        if not isinstance(value, dict):
-            raise ConfigError(f"`{self._key(name)}` must be a mapping of strings to strings")
-        mapping: dict[str, str] = {}
-        for raw_key, raw_value in value.items():
-            if not isinstance(raw_key, str) or not isinstance(raw_value, str):
-                raise ConfigError(f"`{self._key(name)}` must map strings to strings")
-            if not raw_key.strip() or not raw_value.strip():
-                raise ConfigError(f"`{self._key(name)}` must not contain empty keys or values")
-            mapping[raw_key.strip()] = raw_value.strip()
-        return mapping
-
-
-def _gate(section: _Section) -> GateConfig:
+def _gate(section: Section) -> GateConfig:
     """The gate rules, refusing a section that would admit nothing (or, unstated, everything)."""
     section.reject_unknown("labels", "authors", "allow_all")
     gate = GateConfig(
@@ -297,7 +220,7 @@ def _gate(section: _Section) -> GateConfig:
     return gate
 
 
-def _task(section: _Section) -> TaskConfig:
+def _task(section: Section) -> TaskConfig:
     """The dispatch fields, with the id prefix checked against worc's id grammar."""
     section.reject_unknown(
         "task_type",
@@ -341,7 +264,7 @@ def is_repo_relative_dir(value: str) -> bool:
     return all(part not in {"", ".", ".."} for part in value.split("/"))
 
 
-def _worc(section: _Section, *, clone_root: Path) -> WorcConfig:
+def _worc(section: Section, *, clone_root: Path) -> WorcConfig:
     """How to reach worc, with ``repo_path`` resolved and proven to be a directory."""
     section.reject_unknown(
         "command",
@@ -373,7 +296,7 @@ def _worc(section: _Section, *, clone_root: Path) -> WorcConfig:
     )
 
 
-def _write_back(section: _Section) -> WriteBackConfig:
+def _write_back(section: Section) -> WriteBackConfig:
     """What the connector is allowed to write back onto an item."""
     section.reject_unknown("labels_prefix", "comment", "close_on_merge")
     return WriteBackConfig(
@@ -383,16 +306,28 @@ def _write_back(section: _Section) -> WriteBackConfig:
     )
 
 
-def _triage(section: _Section) -> TriageConfig:
-    """The optional triage path, off unless the operator states otherwise."""
-    section.reject_unknown("enabled", "flow")
-    return TriageConfig(
-        enabled=section.flag("enabled", default=False),
-        flow=section.string("flow", DEFAULT_TRIAGE_FLOW),
-    )
+def _named(modes: Iterable[ResearchMode]) -> str:
+    """A set of modes as the operator writes them, for an error that has to list the choices."""
+    return ", ".join(sorted(str(mode) for mode in modes))
 
 
-def _document(path: Path) -> _Section:
+def _research(section: Section) -> ResearchConfig:
+    """The optional analysis step, off unless the operator states otherwise."""
+    section.reject_unknown("mode", "flow")
+    raw = section.string("mode", str(ResearchMode.OFF))
+    try:
+        mode = ResearchMode(raw)
+    except ValueError:
+        raise ConfigError(f"`research.mode` must be one of: {_named(ResearchMode)}") from None
+    if mode not in IMPLEMENTED_RESEARCH_MODES:
+        raise ConfigError(
+            f"`research.mode: {mode}` names a research runtime this build does not carry; "
+            f"this build implements: {_named(IMPLEMENTED_RESEARCH_MODES)}"
+        )
+    return ResearchConfig(mode=mode, flow=section.string("flow", DEFAULT_RESEARCH_FLOW))
+
+
+def _document(path: Path) -> Section:
     """The parsed top-level mapping of the file at ``path``, or a :class:`ConfigError`."""
     try:
         text = path.read_text(encoding="utf-8")
@@ -408,7 +343,7 @@ def _document(path: Path) -> _Section:
         raise ConfigError(f"{path.as_posix()} is not valid YAML: {exc}") from exc
     if loaded is None:
         raise ConfigError(f"{path.as_posix()} is empty")
-    return _Section(loaded)
+    return Section(loaded)
 
 
 def load(path: Path) -> ConnectorConfig:
@@ -429,7 +364,7 @@ def load(path: Path) -> ConnectorConfig:
         "task",
         "worc",
         "write_back",
-        "triage",
+        "research",
     )
     version = document.positive_int("schema_version", SCHEMA_VERSION)
     if version != SCHEMA_VERSION:
@@ -453,5 +388,5 @@ def load(path: Path) -> ConnectorConfig:
         task=_task(document.section("task")),
         worc=_worc(document.section("worc"), clone_root=path.parent.parent),
         write_back=_write_back(document.section("write_back")),
-        triage=_triage(document.section("triage")),
+        research=_research(document.section("research")),
     )

@@ -13,6 +13,12 @@ nothing, and the same failure is never reported twice. Every body is a template 
 carrying a task id, a status name and URLs — never the item's own text, never a log line, never a
 diff, and never anything read out of worc's home. Bodies travel as files; the closing message is
 the one exception the tracker's own command shape forces, and it is a template too.
+
+**One kind of body carries text this package did not write**: the reason a triage verdict gives,
+which is prose the triage agent produced. It is published unchanged because the person who has to
+act on a ``needs-info`` question is the reporter reading the item, and a paraphrase would be a
+question nobody can answer. The cost is stated where it is paid: an item's own text can steer, via
+the agent that read it, the text of a comment this connector posts.
 """
 
 from __future__ import annotations
@@ -32,13 +38,17 @@ logger = logging.getLogger(__name__)
 
 # Which of the connector's phases the item is shown. The phases before the handoff have no state of
 # their own: an item whose task has not reached worc yet is an item nothing has happened to, and
-# announcing "about to queue" would be a promise the next tick might not keep.
+# announcing "about to queue" would be a promise the next tick might not keep. Neither has the phase
+# a triage task ends in when its report was actionable — what the item should show then is the state
+# of the implementation task that report produced, and "analysed" is a step nobody can act on.
 PHASE_STATES: Final = {
     Phase.QUEUED: ItemState.QUEUED,
     Phase.RUNNING: ItemState.IN_PROGRESS,
     Phase.PR_OPEN: ItemState.PR_OPEN,
     Phase.DONE: ItemState.DONE,
     Phase.FAILED: ItemState.FAILED,
+    Phase.NEEDS_INFO: ItemState.NEEDS_INFO,
+    Phase.DECLINED: ItemState.DECLINED,
 }
 
 # The reverse, for rebuilding a row from what the item already shows.
@@ -111,9 +121,16 @@ class WriteBack:
 def _comment_body(row: ItemRow, state: ItemState) -> str | None:
     """The comment a move into ``state`` deserves, or ``None`` where it deserves none.
 
-    Three of the five states are worth a comment: the task exists, the pull request exists, the
-    task ended without one. ``in-progress`` is not — the label already says it, and a comment per
-    step would bury the item's own conversation. Nor is ``done``, whose closing message says it.
+    Five of the seven states are worth a comment: the task exists, the pull request exists, the task
+    ended without one, and the two a triage verdict ends an item in — where the whole point is the
+    reason, because ``needs-info`` without the question is a label nobody can answer.
+    ``in-progress`` is not — the label already says it, and a comment per step would bury the item's
+    own conversation. Nor is ``done``, whose closing message says it.
+
+    The triage reason is **prose an agent wrote**, and it is published as the agent wrote it. That
+    is a deliberate, recorded choice rather than an oversight: the reporter is the person who has to
+    act on the question, and what it costs is that an item's own text can steer, through the agent
+    that read it, the text of a comment this connector posts.
     """
     task = row.task_id or "the task"
     if state is ItemState.QUEUED:
@@ -122,6 +139,17 @@ def _comment_body(row: ItemRow, state: ItemState) -> str | None:
         return f"worc task `{task}` opened a pull request: {row.pr_url}\n"
     if state is ItemState.FAILED:
         return _failure_body(row, task)
+    if state is ItemState.NEEDS_INFO:
+        return (
+            f"Triage (worc task `{task}`) needs more information before this can be worked on:\n\n"
+            f"{row.research_note or 'no reason was recorded'}\n\n"
+            "Reply on this issue and triage will run again.\n"
+        )
+    if state is ItemState.DECLINED:
+        return (
+            f"Triage (worc task `{task}`) did not turn this into work:\n\n"
+            f"{row.research_note or 'no reason was recorded'}\n"
+        )
     return None
 
 
@@ -129,10 +157,13 @@ def _failure_body(row: ItemRow, task: str) -> str:
     """Why the task ended without a pull request, in as much detail as worc itself published.
 
     A task worc's validation gate refused has no run to point anybody at, so the reason worc gave
-    is the whole of what can be said — and it is the only thing taken from that entry. Where worc
-    published none, the comment says what it can and sends the operator to the host, which is the
-    one place worc's own record of a task lives.
+    is the whole of what can be said — and it is the only thing taken from that entry. A triage task
+    that ran but left nothing readable is the connector's own diagnosis and says where it looked.
+    Where neither applies, the comment says what it can and sends the operator to the host, which is
+    the one place worc's own record of a task lives.
     """
+    if row.research_note:
+        return f"worc task `{task}` produced no work: {row.research_note}.\n"
     if row.validation_reason:
         return (
             f"worc's validation gate refused task `{task}`: `{row.validation_reason}`.\n\n"

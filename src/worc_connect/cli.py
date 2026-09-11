@@ -1,7 +1,8 @@
 """Command-line entry point — the composition root.
 
 ``init`` creates the connector's home, ``watch`` runs the loop (once or as a daemon, really or as a
-dry run) and ``status`` reports what the connector believes. This is the only module that resolves a
+dry run), ``status`` reports what the connector believes, and ``install-flow`` delivers the triage
+flow this package ships into worc's own flow directory. This is the only module that resolves a
 tracker adapter by name: it looks the configured tracker up in the ``worc_connect.trackers``
 entry-point group and hands the loop whatever it finds, which is why no module below it imports a
 concrete adapter.
@@ -21,7 +22,7 @@ from collections.abc import Callable
 from importlib.metadata import entry_points
 from pathlib import Path
 
-from worc_connect import __version__
+from worc_connect import __version__, flows
 from worc_connect import config as config_module
 from worc_connect.config import ConfigError, ConnectorConfig
 from worc_connect.core.loop import Action, TickReport, Watcher
@@ -32,7 +33,8 @@ from worc_connect.core.state import (
     ItemRow,
     StateStore,
 )
-from worc_connect.core.worc_cli import WorcCommand
+from worc_connect.core.worc_cli import WorcCommand, WorcUnavailable
+from worc_connect.core.worc_version import MINIMUM_VERSION
 from worc_connect.home import HOME_DIRNAME, ConnectorHome, ensure_gitignore_entry, render_config
 from worc_connect.trackers.base import AdapterFactory, TrackerAdapter
 
@@ -85,6 +87,18 @@ def build_parser() -> argparse.ArgumentParser:
         "status", parents=[common], help="report the known items, the watermark and the last tick"
     )
     status.set_defaults(handler=_cmd_status)
+
+    install_flow = subcommands.add_parser(
+        "install-flow",
+        parents=[common],
+        help="copy the shipped triage flow into worc's .worc/flows/",
+    )
+    install_flow.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite a copy you have edited (without this, an edited file is left alone)",
+    )
+    install_flow.set_defaults(handler=_cmd_install_flow)
 
     return parser
 
@@ -182,6 +196,76 @@ def _cmd_status(args: argparse.Namespace) -> int:
     finally:
         store.close()
     return _EXIT_OK
+
+
+def _cmd_install_flow(args: argparse.Namespace) -> int:
+    """Deliver the shipped triage flow into worc's flow directory, on an explicit command only.
+
+    Three things are checked before anything is written, and each of them is a reason the flow
+    would be installed and then not work: the analysis step has to be switched on, the configured
+    flow has to be the one this package ships, and the installed worc has to understand the
+    ``report_dir`` key the flow declares — without it worc refuses the flow at load, and the
+    operator would learn that from a task that failed rather than from the command that installed
+    it.
+    """
+    home = _home(args)
+    try:
+        config = config_module.load(home.config_path)
+    except ConfigError as exc:
+        print(f"worc-connect: {exc}", file=sys.stderr)
+        return _EXIT_USAGE
+    if not config.research.in_worc:
+        print(
+            "worc-connect: `research.mode` is not `worc`, so nothing needs this flow; set it and "
+            "run install-flow again",
+            file=sys.stderr,
+        )
+        return _EXIT_USAGE
+    if config.research.flow != flows.PACKAGED_FLOW:
+        print(
+            f"worc-connect: `research.flow` names `{config.research.flow}`, and this package ships "
+            f"`{flows.PACKAGED_FLOW}` — a flow of your own is yours to install",
+            file=sys.stderr,
+        )
+        return _EXIT_USAGE
+    if not _worc_understands_the_flow(config):
+        print(
+            f"worc-connect: the worc in this clone predates `flow.report_dir`, which this flow "
+            f"declares, and would refuse it at load; worc {MINIMUM_VERSION} or newer is needed",
+            file=sys.stderr,
+        )
+        return _EXIT_FAILED
+    return _report_installation(
+        flows.install(flows.flows_dir(config.worc.repo_path), force=args.force)
+    )
+
+
+def _worc_understands_the_flow(config: ConnectorConfig) -> bool:
+    """Whether the installed worc knows the flow key this flow depends on.
+
+    The same handshake the task builder uses, against the same minimum: the release that ships
+    ``references:`` is the one that ships ``report_dir``, so one version answers both questions.
+    """
+    worc = WorcCommand(command=config.worc.command, repo_path=config.worc.repo_path)
+    try:
+        return worc.accepts_references()
+    except WorcUnavailable:  # pragma: no cover - the handshake answers rather than raising
+        return False
+
+
+def _report_installation(installed: flows.Installed) -> int:
+    """Print what the install did, file by file, and fail when an edited copy was left alone."""
+    for name, outcome in installed.results:
+        print(f"install-flow: {outcome} {name}")
+    if not installed.refused:
+        print("install-flow: worc will pick the flow up on its next task")
+        return _EXIT_OK
+    print(
+        "worc-connect: the files above are not the ones this package ships — re-run with --force "
+        "to replace your edits",
+        file=sys.stderr,
+    )
+    return _EXIT_FAILED
 
 
 def _row_line(row: ItemRow) -> str:

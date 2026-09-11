@@ -25,8 +25,8 @@ from worc_connect.config import (
     DEFAULT_MAX_TASK_BYTES,
     DEFAULT_MAX_TASK_LINES,
     DEFAULT_POLL_INTERVAL_SECONDS,
+    DEFAULT_RESEARCH_FLOW,
     DEFAULT_TASKS_DIR,
-    DEFAULT_TRIAGE_FLOW,
     DEFAULT_TRIGGER_LABEL,
     DEFAULT_WORC_COMMAND,
     SCHEMA_VERSION,
@@ -91,6 +91,16 @@ class ConnectorHome:
         """Where a triage flow leaves its report, inside a directory the connector owns."""
         return self.path / TRIAGE_DIRNAME
 
+    @property
+    def report_dir(self) -> str:
+        """The flow's ``report_dir``: this home's report directory, relative to the clone.
+
+        POSIX and repo-relative because that is the shape worc's flow validator accepts and the
+        shape the shipped flow declares; the two have to agree or the report lands somewhere the
+        connector does not read.
+        """
+        return f"{HOME_DIRNAME}/{TRIAGE_DIRNAME}"
+
 
 def render_config(*, tracker: str, repo: str) -> str:
     """The configuration file ``init`` writes: every key the loader accepts, with its default.
@@ -152,9 +162,14 @@ write_back:
   #   closing keyword (`Fixes #<n>` on GitHub) and worc appends it to the pull-request body, so
   #   merging into the default branch closes the item and the connector only labels it done.
 
-triage:
-  enabled: false
-  flow: {DEFAULT_TRIAGE_FLOW}
+# The optional analysis step. `off` sends a gated item straight to an implementation task. `worc`
+# queues a *triage* task first — one agent run per item, inside worc's own sandbox — and builds the
+# implementation task from the report it leaves in `.worc-connect/triage/<task-id>/report.md`.
+# Install the shipped flow with `worc-connect install-flow` before turning this on.
+research:
+  # Quoted on purpose: YAML reads a bare `off` as the boolean false, not as this mode's name.
+  mode: "off" # "off" | "worc"
+  flow: {DEFAULT_RESEARCH_FLOW} # the flow a triage task names; `install-flow` ships this one
 """
 
 

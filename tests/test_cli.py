@@ -13,12 +13,14 @@ import pytest
 
 from support import (
     FakeGh,
+    FakeWorc,
     base_config,
     issue_payload,
     requires_installed_distribution,
     work_item,
     write_config,
 )
+from worc_connect import flows
 from worc_connect.cli import main
 from worc_connect.core.state import StateStore
 from worc_connect.home import ConnectorHome
@@ -223,3 +225,123 @@ def test_status_creates_no_database(home: ConnectorHome) -> None:
 
 def test_status_without_a_configuration_is_a_configuration_error(home: ConnectorHome) -> None:
     assert main(["status", "--home", str(home.path)]) == 2
+
+
+# --- install-flow: the one write the connector makes inside worc's own home --------------------
+
+
+def install_config(home: ConnectorHome, **research: object) -> None:
+    """A configuration with the analysis step set as a test wants it."""
+    document = base_config()
+    document["research"] = {"mode": "worc", "flow": "issue_triage", **research}
+    write_config(home, document)
+
+
+def flows_dir(home: ConnectorHome) -> Path:
+    return home.clone_path / ".worc" / "flows"
+
+
+def test_install_flow_delivers_the_flow_and_every_prompt_it_names(
+    home: ConnectorHome, fake_worc: FakeWorc, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install_config(home)
+
+    code = main(["install-flow", "--home", str(home.path)])
+
+    assert code == 0
+    target = flows_dir(home)
+    assert (target / "issue_triage.yaml").is_file()
+    assert {path.name for path in (target / "issue_triage").glob("*.md")} == {
+        "scope.md",
+        "analysis.md",
+        "reproduction.md",
+        "verifier.md",
+        "report.md",
+    }
+    assert "written" in capsys.readouterr().out
+
+
+def test_install_flow_ships_the_bytes_this_package_carries(
+    home: ConnectorHome, fake_worc: FakeWorc
+) -> None:
+    # worc fingerprints a flow by hashing it, so an installed copy that is not byte-identical to
+    # the shipped one is a different flow than the one this repository's tests judged.
+    install_config(home)
+
+    main(["install-flow", "--home", str(home.path)])
+
+    target = flows_dir(home)
+    for name, content in flows.packaged().items():
+        assert (target / name).read_bytes() == content
+
+
+def test_installing_twice_changes_nothing_the_second_time(
+    home: ConnectorHome, fake_worc: FakeWorc, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install_config(home)
+    main(["install-flow", "--home", str(home.path)])
+    capsys.readouterr()
+
+    code = main(["install-flow", "--home", str(home.path)])
+
+    assert code == 0
+    assert "written" not in capsys.readouterr().out
+
+
+def test_a_copy_you_edited_is_left_alone_until_you_say_otherwise(
+    home: ConnectorHome, fake_worc: FakeWorc, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install_config(home)
+    main(["install-flow", "--home", str(home.path)])
+    edited = flows_dir(home) / "issue_triage" / "analysis.md"
+    edited.write_text("my own analysis prompt\n", encoding="utf-8", newline="")
+
+    code = main(["install-flow", "--home", str(home.path)])
+
+    assert code == 1
+    assert edited.read_text(encoding="utf-8") == "my own analysis prompt\n"
+    assert "--force" in capsys.readouterr().err
+
+    forced = main(["install-flow", "--home", str(home.path), "--force"])
+
+    assert forced == 0
+    assert edited.read_text(encoding="utf-8") != "my own analysis prompt\n"
+
+
+def test_install_flow_refuses_while_the_analysis_step_is_off(
+    home: ConnectorHome, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_config(home, base_config())  # `research.mode` defaults to off
+
+    code = main(["install-flow", "--home", str(home.path)])
+
+    assert code == 2
+    assert "research.mode" in capsys.readouterr().err
+    assert not (home.clone_path / ".worc").exists()
+
+
+def test_install_flow_leaves_a_flow_of_your_own_to_you(
+    home: ConnectorHome, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install_config(home, flow="my_triage")
+
+    code = main(["install-flow", "--home", str(home.path)])
+
+    assert code == 2
+    assert "my_triage" in capsys.readouterr().err
+    assert not (home.clone_path / ".worc").exists()
+
+
+def test_install_flow_refuses_a_worc_that_would_reject_the_flow(
+    home: ConnectorHome, fake_worc: FakeWorc, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The flow declares `report_dir`, which a worc from before that key refuses at load — the
+    # operator would otherwise learn that from a task that failed rather than from this command.
+    install_config(home)
+    fake_worc.configure(version="0.13.0a1")
+
+    code = main(["install-flow", "--home", str(home.path)])
+
+    assert code == 1
+    assert "report_dir" in capsys.readouterr().err
+    assert not (home.clone_path / ".worc").exists()

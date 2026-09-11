@@ -1,8 +1,9 @@
 # Phase 07 — Optional triage
 
-- **Status:** ☐
+- **Status:** ☑ code complete
 - **Depends on:** 04 and 05 — worc phase 08 is merged into worc's `dev`, so a flow may declare the report directory this phase needs (Q-6, decided 2026-09-11)
-- **Delivers:** FR-C15 — `triage.enabled: true` turns a gated item into a triage task first; the connector reads the report and either runs the same task builder (verdict `actionable`) or writes back `needs-info` / `duplicate` / `declined`. The flow and its role prompts ship in the connector repository and are installed into `.worc/flows/` by `install-flow`, only when the switch is on.
+- **Note:** the switch is `research.mode` (`off` | `worc` | `local`), decided 2026-09-11 with the [local-research](../../local-research/README.md) record; this phase builds the `worc` value and the report contract both values share.
+- **Delivers:** FR-C15 — `research.mode: worc` turns a gated item into a triage task first; the connector reads the report and either runs the same task builder (verdict `actionable`) or writes back `needs-info` / `duplicate` / `declined`. The flow and its role prompts ship in the connector repository and are installed into `.worc/flows/` by `install-flow`, only when the switch is on.
 
 ## Goal
 
@@ -34,10 +35,17 @@ Add the analyse-and-reproduce mechanic the operator originally described, as a s
 
 ## Docs to sync in this phase
 
-- Connector README (what triage adds, its cost — one agent run per item — and the `needs-info` round-trip); configuration reference (`triage.*`).
+- Connector README (what triage adds, its cost — one agent run per item — and the `needs-info` round-trip); configuration reference (`research.*`).
 
 ## Acceptance for this phase
 
-- [ ] With `triage.enabled: true`, a real labelled issue produces a triage task, then either an implementation task or a `worc:needs-info` comment, per the report.
-- [ ] With the switch off nothing from this phase is reachable and no flow file is written.
+- [ ] With `research.mode: worc`, a real labelled issue produces a triage task, then either an implementation task or a `worc:needs-info` comment, per the report. _(the operator's own run; every step of it is covered against the fakes, and the shipped flow against worc's real validator)_
+- [x] With the switch off nothing from this phase is reachable and no flow file is written.
 - [ ] Both CI families green.
+
+## Decided while building this phase
+
+- **The verdict block is tagged `worc-connect-triage`,** not plain YAML: a report is prose with examples in it, and a language tag nobody renders is the only fence that cannot collide with one the agent wrote about something else. A report with no such block, an unclosed fence, a non-mapping body, or a verdict outside the four words produces no task at all.
+- **Two rows, two ids.** The triage task and the implementation task it produced are separate rows at consecutive sequence numbers (`gh-142`, `gh-142.2`), which is what keeps "an id is never reused" true on the second path. The triage row ends in a phase the item is never shown.
+- **A `needs-info` re-trigger is armed by the item's update stamp**, not by the trigger label being cycled: the connector asked a question, so the reporter answering it is the new request. Every other re-trigger keeps the existing arming.
+- **The report's reason is published unchanged** on the item, with the cost of that recorded in `docs/backlog/follow-ups.md` (FU-1).

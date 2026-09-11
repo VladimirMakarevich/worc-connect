@@ -13,8 +13,14 @@ import pytest
 
 from support import base_config, write_config
 from worc_connect import config as config_module
-from worc_connect.config import ConfigError, is_valid_repo, is_valid_task_id, load
-from worc_connect.home import ConnectorHome
+from worc_connect.config import (
+    ConfigError,
+    ResearchMode,
+    is_valid_repo,
+    is_valid_task_id,
+    load,
+)
+from worc_connect.home import ConnectorHome, render_config
 
 
 def test_a_full_configuration_loads_with_paths_resolved(home: ConnectorHome) -> None:
@@ -303,3 +309,77 @@ def test_task_ids_worc_rejects(candidate: str) -> None:
 @pytest.mark.parametrize("repo", ["OWNER/REPO", "a/b", "Some-Owner/some.repo_1"])
 def test_repositories_that_can_be_pinned(repo: str) -> None:
     assert is_valid_repo(repo)
+
+
+# --- the optional analysis step ----------------------------------------------------------------
+
+
+def test_the_analysis_step_is_off_unless_the_operator_names_a_mode(home: ConnectorHome) -> None:
+    document = base_config()
+    document.pop("research")
+
+    loaded = load(write_config(home, document))
+
+    assert loaded.research.mode is ResearchMode.OFF
+    assert loaded.research.in_worc is False
+
+
+def test_the_worc_mode_is_the_one_that_queues_a_triage_task(home: ConnectorHome) -> None:
+    document = base_config()
+    document["research"] = {"mode": "worc"}
+
+    loaded = load(write_config(home, document))
+
+    assert loaded.research.in_worc is True
+    assert loaded.research.flow == "issue_triage"
+
+
+def test_a_mode_this_build_cannot_carry_out_is_refused_by_name(home: ConnectorHome) -> None:
+    # Refused rather than quietly doing something else: an operator who asked for local research
+    # and got worc-side triage would be paying for the queue slot they deliberately avoided.
+    document = base_config()
+    document["research"] = {"mode": "local"}
+
+    with pytest.raises(ConfigError, match=r"research\.mode: local"):
+        load(write_config(home, document))
+
+
+def test_a_mode_outside_the_vocabulary_lists_the_choices(home: ConnectorHome) -> None:
+    document = base_config()
+    document["research"] = {"mode": "sometimes"}
+
+    with pytest.raises(ConfigError, match=r"research\.mode.*off.*worc"):
+        load(write_config(home, document))
+
+
+def test_an_unquoted_off_says_which_mistake_it_is(home: ConnectorHome) -> None:
+    # YAML reads a bare `off` as the boolean false, so the value an operator is most likely to type
+    # is the one that does not survive the parser.
+    document = base_config()
+    write_config(home, document)
+    text = home.config_path.read_text(encoding="utf-8").replace("mode: 'off'", "mode: off")
+    home.config_path.write_text(text, encoding="utf-8", newline="")
+
+    with pytest.raises(ConfigError, match=r"Quote the value"):
+        load(home.config_path)
+
+
+def test_an_unknown_key_in_the_research_section_is_refused(home: ConnectorHome) -> None:
+    document = base_config()
+    document["research"] = {"mode": "worc", "modes": "worc"}
+
+    with pytest.raises(ConfigError, match=r"research\.modes"):
+        load(write_config(home, document))
+
+
+def test_the_configuration_init_writes_is_one_the_loader_accepts_with_the_step_off(
+    home: ConnectorHome,
+) -> None:
+    home.path.mkdir(parents=True)
+    home.config_path.write_text(
+        render_config(tracker="github", repo="OWNER/REPO"), encoding="utf-8", newline=""
+    )
+
+    loaded = load(home.config_path)
+
+    assert loaded.research.mode is ResearchMode.OFF

@@ -41,8 +41,8 @@ write_back:
   comment: true
   close_on_merge: true
 
-triage:
-  enabled: false
+research:
+  mode: "off" # "off" | "worc"
   flow: issue_triage
 ```
 
@@ -142,7 +142,7 @@ Source: github item #142 by @reporter — https://github.com/OWNER/REPO/issues/1
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `labels_prefix` | `worc:` | Prefix of the connector-owned state labels (`worc:queued`, `worc:in-progress`, `worc:pr-open`, `worc:done`, `worc:failed`). Exactly one is present at a time, and re-applying the one the item already shows does nothing. |
+| `labels_prefix` | `worc:` | Prefix of the connector-owned state labels (`worc:queued`, `worc:in-progress`, `worc:pr-open`, `worc:done`, `worc:failed`, and with triage on `worc:needs-info` / `worc:declined`). Exactly one is present at a time, and re-applying the one the item already shows does nothing. |
 | `comment` | `true` | Whether to comment when the task is queued, when its pull request exists, and when it ends without one. The closing message on a merge is not a comment and is not switched off by this. |
 | `close_on_merge` | `true` | Whether to close the item when its pull request is merged. With it off the item keeps its `worc:done` label, and **GitHub closes it instead**: the generated task carries `references: ["Fixes #<n>"]`, which worc appends to the pull-request body, so merging into the default branch closes the issue with the code host's own link between the two. Against a worc older than 0.14.0a1 there is no such key, and the item then simply stays open for you to close. |
 
@@ -152,12 +152,40 @@ The labels are **created on demand**: the connector asks the tracker which of th
 
 Comment bodies are connector-authored templates carrying the task id, a status name and URLs — never the item's own text, never a log line, never a diff — and they reach the tracker as **files**, never as command arguments. The closing message on a merge is the one body that travels as an argument, because `gh issue close` offers no file form; it is a template too, carrying only the task id and the pull-request URL.
 
-## `triage` — the optional analysis path
+## `research` — the optional analysis step
+
+Off by default. With it on, a gated item becomes a worc _triage_ task first and the **same** task builder then produces the implementation task from that task's report — so what an implementation task looks like never depends on which path it took.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `false` | When true, a gated item first becomes a worc _triage_ task and the same task builder then runs on its report. |
-| `flow` | `issue_triage` | The flow the triage task names. Installed into worc's `.worc/flows/` by an explicit `worc-connect install-flow`, and only while the switch is on. |
+| `mode` | `"off"` | `"off"` sends a gated item straight to an implementation task. `"worc"` queues a triage task into worc first — one extra agent run per item, inside worc's own sandbox. **Quote the value**: YAML reads a bare `off` as the boolean false. |
+| `flow` | `issue_triage` | The flow a triage task names, resolved by worc as `.worc/flows/<flow>.yaml`. `worc-connect install-flow` ships `issue_triage`; naming anything else means the flow is yours to write and install. |
+
+`mode: "local"` is a value of the vocabulary that this build does not implement, and the loader refuses it by name rather than falling back to `worc` — an operator who asked for local research and got a worc queue slot would be paying for exactly what they avoided.
+
+### What the triage task produces
+
+The report lands at `.worc-connect/triage/<task-id>/report.md` — the flow's declared `report_dir`, inside the connector's own gitignored home, never under `.worc/`. The connector reads one machine-readable block at the end of it and acts on the verdict:
+
+| Verdict | What happens |
+| --- | --- |
+| `actionable` | The implementation task is built from the report: its reason as the description, its acceptance criteria under `## Acceptance criteria`, and its failing test under `## Failing test`. The task gets the next id (`gh-142` triaged → `gh-142.2` implemented), so no id is ever reused. |
+| `needs-info` | The item is labelled `worc:needs-info` and the report's question is commented. When the reporter replies — the item's update stamp advances and the gate still admits it — triage runs again with the next id. |
+| `duplicate` | The item is labelled `worc:declined`; the comment names what it duplicates. |
+| `declined` | The item is labelled `worc:declined`; the comment says why. |
+
+A report that is **missing**, that carries no verdict block, or whose verdict is not one of those four ends the attempt at `worc:failed` with a comment naming the path the connector looked at. There is no second location to look in.
+
+### Installing the flow
+
+```bash
+worc-connect install-flow          # only with `research.mode: worc`
+worc-connect install-flow --force  # replace a copy you have edited
+```
+
+The command writes the shipped flow and its five role prompts into `.worc/flows/` — the only thing the connector ever writes inside worc's home, and only on this explicit command. It refuses before writing anything when the step is off, when `research.flow` names a flow this package does not ship, or when the worc in the clone predates `flow.report_dir` and would refuse the flow at load. A file identical to the shipped one is rewritten silently; a file you have edited is left alone and reported, so re-running the command is a safe way to pick up a newer flow.
+
+The flow itself can weaken nothing: it declares `publishing: none`, grants no network, keeps every node but the reproduction one read-only, and confines that one node's writes to the report directory. worc's validator and sandbox enforce all of it.
 
 ## The connector's home
 
@@ -170,7 +198,7 @@ Everything the connector owns lives in `.worc-connect/` next to worc's own `.wor
 | `connect.log` | One line per action: `item=… task=… action=… result=…`. Ids and URLs are the only item-derived values it carries. |
 | `connect.pid` | Written while a `watch` daemon runs, removed when it exits cleanly. A second `watch` in the same clone refuses to start while it exists; after a crash, delete it. |
 | `connect.stop` | The stop sentinel. Create the file and the loop exits before its next tick and removes it. A file rather than a signal, so Windows behaves like POSIX. |
-| `triage/<task-id>/` | Where a triage flow leaves its report, in a directory the connector owns rather than under `.worc/`. |
+| `triage/<task-id>/report.md` | Where the triage flow leaves its report, in a directory the connector owns rather than under `.worc/`. Read by the connector, written by worc, and gitignored — worc refuses to publish a private report that git can see. |
 
 `worc-connect init` appends `.worc-connect/` to the clone's tracked `.gitignore`, so nothing here can reach a commit.
 

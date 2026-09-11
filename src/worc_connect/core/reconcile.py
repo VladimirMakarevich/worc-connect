@@ -19,13 +19,15 @@ from datetime import datetime
 from typing import Final
 
 from worc_connect.config import ConnectorConfig
-from worc_connect.core import builder, handoff, pullrequest
+from worc_connect.core import builder, handoff, pullrequest, triage
 from worc_connect.core.items import ItemState, WorkItem
 from worc_connect.core.naming import allocate_branch, allocate_task_id
 from worc_connect.core.sanitize import sanitize_title
-from worc_connect.core.state import ItemRow, Phase, StateStore
+from worc_connect.core.state import TERMINAL_PHASES, ItemRow, Phase, Stage, StateStore
+from worc_connect.core.triage import Report, Verdict
 from worc_connect.core.worc_cli import REJECTED_STATUS, ListedTask, WorcCommand, status_token
 from worc_connect.core.writeback import STATE_PHASES
+from worc_connect.home import ConnectorHome
 from worc_connect.trackers.base import TrackerAdapter
 
 logger = logging.getLogger(__name__)
@@ -50,9 +52,31 @@ _STATUS_PHASES: Final = {
 # The phases worc's own listing still has something to say about.
 _FOLLOWED_PHASES: Final = frozenset({Phase.QUEUED, Phase.RUNNING})
 
+# The status worc gives a task from the moment it published. For an implementation task that means
+# "now watch the pull request"; for a triage task, which publishes nothing, it means the report is
+# there to read.
+_DONE_STATUS: Final = "done"
+
 # How many attempts at one item a rebuild looks for. An item re-triggered more times than this is
 # not a case worth a listing scan; the highest attempt found is what the row is rebuilt from.
 _MAX_REBUILT_SEQ: Final = 50
+
+# Where each triage verdict leaves the attempt. Only ``actionable`` produces work; the other three
+# end it on the item, which is what the whole step is for — an item nobody can act on costs one
+# analysis instead of an implementation run. ``duplicate`` is published as ``declined`` because that
+# is the state vocabulary the tracker side owns; which duplicate it was is in the comment.
+_VERDICT_PHASES: Final = {
+    Verdict.ACTIONABLE: Phase.RESEARCHED,
+    Verdict.NEEDS_INFO: Phase.NEEDS_INFO,
+    Verdict.DUPLICATE: Phase.DECLINED,
+    Verdict.DECLINED: Phase.DECLINED,
+}
+
+# What the item is told when a triage task ended but left nothing this build can read. Connector
+# authored: there is no report to quote, which is exactly the problem being reported.
+_NO_REPORT_NOTE: Final = (
+    "the triage task finished but left no readable report at {path} — nothing was queued from it"
+)
 
 
 @dataclass
@@ -69,6 +93,7 @@ class Reconciler:
     store: StateStore
     worc: WorcCommand
     adapter: TrackerAdapter
+    home: ConnectorHome
     _listing: dict[str, ListedTask] | None = None
 
     def advance(self, row: ItemRow, item: WorkItem, *, now: datetime) -> ItemRow:
@@ -84,6 +109,10 @@ class Reconciler:
             self.store.save(moved)
             return moved
         moved = self._follow_task(moved, now=now)
+        if moved.stage is Stage.RESEARCH:
+            # A triage task publishes nothing, so there is no pull request to watch: what it leaves
+            # behind is a report, and reading it is what moves this row on.
+            return self._after_research(moved, item, now=now)
         moved = pullrequest.PullRequestWatcher(adapter=self.adapter).advance(
             moved, url=self._recorded_pr_url(moved), now=now
         )
@@ -138,13 +167,7 @@ class Reconciler:
         A branch already on the row means this attempt continues the previous one's pull request
         rather than opening a second one, so the task is built with that branch as its ref.
         """
-        draft = builder.build(
-            item,
-            self.config,
-            seq=row.seq,
-            branch_ref=row.branch,
-            references=self._references(item),
-        )
+        draft = self._draft(row, item)
         handoff.stage(draft, self.config)
         staged = replace(
             row, task_id=draft.task_id, branch=draft.branch, phase=Phase.STAGED, updated_at=now
@@ -154,6 +177,39 @@ class Reconciler:
         self.store.save(staged)
         _log(staged, "stage", "ok")
         return staged
+
+    def _draft(self, row: ItemRow, item: WorkItem) -> builder.TaskDraft:
+        """The task this row stands for: the triage task, or the implementation task it produced.
+
+        The report is re-read here rather than carried on the row because this is the one place a
+        task file is composed, and a crash between reading a report and writing the file must cost
+        a re-read rather than a task built from nothing.
+        """
+        if row.stage is Stage.RESEARCH:
+            return builder.build_research(item, self.config, seq=row.seq)
+        report = self._report(row.research_task_id)
+        if report is None:
+            return builder.build(
+                item,
+                self.config,
+                seq=row.seq,
+                branch_ref=row.branch,
+                references=self._references(item),
+            )
+        return builder.build_from_report(
+            item,
+            self.config,
+            report,
+            seq=row.seq,
+            branch_ref=row.branch,
+            references=self._references(item),
+        )
+
+    def _report(self, task_id: str | None) -> Report | None:
+        """The triage report ``task_id`` left in the connector's home, if it left a usable one."""
+        if task_id is None:
+            return None
+        return triage.read(self.home.triage_path, task_id)
 
     def _references(self, item: WorkItem) -> tuple[str, ...]:
         """The closing line this task may carry, if the installed worc accepts the key at all.
@@ -246,6 +302,75 @@ class Reconciler:
         _log(row, "follow", "no-task")
         return replace(row, phase=Phase.FAILED, last_status=None, updated_at=now)
 
+    # --- the triage step -------------------------------------------------------------------------
+
+    def _after_research(self, row: ItemRow, item: WorkItem, *, now: datetime) -> ItemRow:
+        """Read the finished triage task's report and act on the verdict it carries.
+
+        A row whose task has not finished yet is saved as it stands and returns; every other
+        outcome is terminal for *this* row — a triage task is asked once, and its answer stands.
+        """
+        if row.phase in TERMINAL_PHASES:
+            return row
+        if row.last_status is None or status_token(row.last_status) != _DONE_STATUS:
+            if row != self.store.latest_row(row.tracker, row.item_id):
+                self.store.save(row)
+            return row
+        report = self._report(row.task_id)
+        if report is None:
+            return self._without_report(row, now=now)
+        _log(row, "triage", str(report.verdict))
+        if report.verdict is Verdict.ACTIONABLE:
+            return self._implement(row, item, report, now=now)
+        return self._concluded(row, _VERDICT_PHASES[report.verdict], _note(report), now=now)
+
+    def _without_report(self, row: ItemRow, *, now: datetime) -> ItemRow:
+        """A triage task that ended leaving nothing readable where the flow declares it writes.
+
+        There is deliberately no second place to look: a fallback is how a connector ends up
+        reading worc's private home, and the report directory is the flow's own declaration.
+        """
+        path = triage.report_path(self.home.triage_path, row.task_id or "")
+        _log(row, "triage", "no-report")
+        return self._concluded(
+            row, Phase.FAILED, _NO_REPORT_NOTE.format(path=path.as_posix()), now=now
+        )
+
+    def _concluded(self, row: ItemRow, phase: Phase, note: str, *, now: datetime) -> ItemRow:
+        """End this attempt in ``phase``, carrying what the item is to be told about it."""
+        ended = replace(row, phase=phase, research_note=note, updated_at=now)
+        self.store.save(ended)
+        return ended
+
+    def _implement(self, row: ItemRow, item: WorkItem, report: Report, *, now: datetime) -> ItemRow:
+        """Turn an actionable report into the implementation task, in this same tick.
+
+        The triage row ends in a phase the item is never shown: what the item should show now is
+        the implementation task's own state, and announcing "analysed" between the two would be a
+        step nobody can act on. The new attempt takes the next sequence number, so the triage task's
+        id is never reused and the item's history reads as the two tasks it actually cost.
+        """
+        self.store.save(
+            replace(row, phase=Phase.RESEARCHED, research_note=_note(report), updated_at=now)
+        )
+        follow_on = ItemRow(
+            tracker=row.tracker,
+            item_id=row.item_id,
+            seq=row.seq + 1,
+            phase=Phase.GATED,
+            created_at=now,
+            updated_at=now,
+            item_updated_at=row.item_updated_at,
+            stage=Stage.IMPLEMENTATION,
+            research_task_id=row.task_id,
+        )
+        self.store.save(follow_on)
+        handed = self._hand_over(follow_on, item, now=now)
+        # Saved here rather than by the caller: this row was created inside the tick, so there is
+        # no earlier version of it for `advance` to compare against and decide to persist.
+        self.store.save(handed)
+        return handed
+
     def _recorded_pr_url(self, row: ItemRow) -> str | None:
         """worc's own record of the pull request this task opened, read only where it is needed.
 
@@ -287,6 +412,18 @@ class Reconciler:
 def phase_for_status(status: str) -> Phase | None:
     """The connector phase worc's ``status`` label means, or ``None`` for one it does not know."""
     return _STATUS_PHASES.get(status_token(status))
+
+
+def _note(report: Report) -> str:
+    """What the item is told about a triage verdict: the report's own words, as it wrote them.
+
+    Agent prose, published to whoever reads the item. It is repeated rather than summarized because
+    the reporter is the person who has to act on it — a ``needs-info`` verdict the connector
+    paraphrased would be a question nobody can answer.
+    """
+    if report.duplicate_of is not None:
+        return f"{report.reason}\n\nDuplicate of {report.duplicate_of}."
+    return report.reason
 
 
 def _log(row: ItemRow, action: str, result: str) -> None:

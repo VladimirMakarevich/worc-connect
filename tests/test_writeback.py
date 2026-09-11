@@ -50,16 +50,24 @@ def write_back(clone: Path, adapter: StubAdapter, **config: object) -> WriteBack
     return WriteBack(config=connector_config(clone, **config), adapter=adapter)
 
 
-def test_the_five_visible_phases_map_to_the_five_states() -> None:
+def test_every_visible_phase_maps_to_one_state_and_back(clone: Path) -> None:
     assert set(PHASE_STATES) == {
         Phase.QUEUED,
         Phase.RUNNING,
         Phase.PR_OPEN,
         Phase.DONE,
         Phase.FAILED,
+        Phase.NEEDS_INFO,
+        Phase.DECLINED,
     }
     reversed_mapping = {state: phase for phase, state in PHASE_STATES.items()}
     assert reversed_mapping == STATE_PHASES
+
+
+def test_a_triage_task_whose_report_was_actionable_shows_the_item_nothing() -> None:
+    # What the item should show then is the implementation task's own state; "analysed" is a step
+    # nobody can act on, and a label for it would be one more notification for nothing.
+    assert Phase.RESEARCHED not in PHASE_STATES
 
 
 @pytest.mark.parametrize("phase", [Phase.GATED, Phase.STAGED])

@@ -1,7 +1,7 @@
 # Phase 07 — Optional triage
 
 - **Status:** ☐
-- **Depends on:** 04, 05, and worc phase 08 (the report directory the flow declares; Q-6 decided 2026-09-11)
+- **Depends on:** 04 and 05 — worc phase 08 is merged into worc's `dev`, so a flow may declare the report directory this phase needs (Q-6, decided 2026-09-11)
 - **Delivers:** FR-C15 — `triage.enabled: true` turns a gated item into a triage task first; the connector reads the report and either runs the same task builder (verdict `actionable`) or writes back `needs-info` / `duplicate` / `declined`. The flow and its role prompts ship in the connector repository and are installed into `.worc/flows/` by `install-flow`, only when the switch is on.
 
 ## Goal

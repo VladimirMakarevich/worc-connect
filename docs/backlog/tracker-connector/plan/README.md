@@ -4,7 +4,7 @@ Builds [design.md](../design.md) toward [acceptance-criteria.md](../acceptance-c
 
 ## Strategy
 
-Two independent tracks. **Phases 01, 02 and 08** are the worc-side contract items and land in the orchestrator repository (their phase documents live there); they are small, need nothing from the connector, and are useful to any scripting or flow-authoring operator on their own. **Phases 03–05** build the connector's v1 in its own repository against worc exactly as it is today — no worc change is on their critical path, which is what lets the connector mechanics be proven first. **Phase 06** joins the tracks: the connector adopts `references:`, `pr_url` and the `rejected` section. **Phase 07** adds the optional triage path last, once real runs have shown what the report needs to carry; it is the only connector phase that waits for a worc phase (08, the report directory).
+Two independent tracks. **Phases 01, 02 and 08** are the worc-side contract items and land in the orchestrator repository (their phase documents live there); they are small, need nothing from the connector, and are useful to any scripting or flow-authoring operator on their own. **All three are merged into worc's `dev`**, so the contract phases 06 and 07 build on exists and neither of them is blocked from outside this repository any more. **Phases 03–05** build the connector's v1 in its own repository against worc exactly as it is today — no worc change is on their critical path, which is what lets the connector mechanics be proven first. **Phase 06** joins the tracks: the connector adopts `references:`, `pr_url` and the `rejected` section. **Phase 07** adds the optional triage path last, once real runs have shown what the report needs to carry.
 
 The critical path is 03 → 04 → 05 → a real end-to-end run. The biggest risk is not code but the boundary: a connector that quietly starts reading `state.db` or writing into `tasks/pending/` because it is easier — every connector phase carries that invariant explicitly.
 
@@ -12,16 +12,16 @@ The critical path is 03 → 04 → 05 → a real end-to-end run. The biggest ris
 
 | # | Phase | Repository | Delivers | Depends on | Status |
 | --- | --- | --- | --- | --- | --- |
-| 01 | `references:` task field appended to the PR body _(worc repository, tracked there)_ | worc (orchestrator repo) | FR-W1: gate validation, `NormalizedTask.references`, publish appends `## References`, guide updated | — | ☐ |
-| 02 | `pr_url` and a `rejected` section in `worc list --format json` _(worc repository, tracked there)_ | worc (orchestrator repo) | FR-W2: the JSON entry carries `pr_url`; FR-W3: `--all` gains a `rejected` section from the ledger; the guide names the shape as the scripting contract | — | ☐ |
+| 01 | `references:` task field appended to the PR body _(worc repository, tracked there)_ | worc (orchestrator repo) | FR-W1: gate validation, `NormalizedTask.references`, publish appends `## References`, guide updated | — | ☑ merged into worc `dev` |
+| 02 | `pr_url` and a `rejected` section in `worc list --format json` _(worc repository, tracked there)_ | worc (orchestrator repo) | FR-W2: the JSON entry carries `pr_url`; FR-W3: `--all` gains a `rejected` section from the ledger; the guide names the shape as the scripting contract | — | ☑ merged into worc `dev` |
 | 03 | [Connector skeleton: core, GitHub adapter (read side), gate, state, dry run](03-connector-skeleton.md) | connector | FR-C1, C2, C8, C13, C14: `watch --once --dry-run` lists what it would do against a real repository | — | ☑ code complete |
 | 04 | [Task builder and handoff](04-connector-builder-handoff.md) | connector | FR-C3, C4, C5, C6, C7: a gated issue becomes a promoted worc task, idempotently | 03 | ☐ |
 | 05 | [Write-back and reconciliation](05-connector-writeback.md) | connector | FR-C9, C10, C11, C12: labels, comments, PR link, close on merge, failure path; first real end-to-end run | 04 | ☐ |
 | 06 | [Adopt the worc contract](06-connector-adopt-contract.md) | connector | `Fixes #<n>` via `references:`, `pr_url` and the rejection reason from `worc list --all`, `close_on_merge` becomes a real choice | 01, 02, 05 | ☐ |
 | 07 | [Optional triage](07-connector-triage.md) | connector (+ flow data) | FR-C15: `triage.enabled`, `install-flow`, the two-step path, the report read from `.worc-connect/triage/<id>/` | 04, 05, 08 | ☐ |
-| 08 | Configurable report directory, private policy included _(worc repository, tracked there)_ | worc (orchestrator repo) | FR-W4: `flow.report_dir`, `{report_dir}` prompt variable, path validation, the private-policy allowance, `deep_research` prompts switched to the variable | — | ☐ |
+| 08 | Configurable report directory, private policy included _(worc repository, tracked there)_ | worc (orchestrator repo) | FR-W4: `flow.report_dir`, `{report_dir}` prompt variable, path validation, the private-policy allowance, `deep_research` prompts switched to the variable | — | ☑ merged into worc `dev` |
 
-Phases 01, 02 and 08 are independent of each other and can run in parallel with 03–05.
+Phases 01, 02 and 08 ran in parallel with 03 and are done; what remains is the connector's own chain, 04 → 05 → 06 → 07.
 
 ## Cross-cutting
 

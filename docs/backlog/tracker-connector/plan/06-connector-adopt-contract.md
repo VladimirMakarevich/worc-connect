@@ -1,7 +1,7 @@
 # Phase 06 — Adopt the worc contract
 
 - **Status:** ☐
-- **Depends on:** 01, 02, 05
+- **Depends on:** 05 — worc phases 01 and 02 are merged into worc's `dev`, so `references:`, `pr_url` and the `rejected` section all exist to adopt
 - **Delivers:** the connector emits `references: ["Fixes #<n>"]` so GitHub can close the issue on merge by itself, reads `pr_url` from `worc list --format json` instead of only discovering the PR by branch, names the gate's `validation_reason` in its rejection comment from the listing's `rejected` section (FR-W3), and `write_back.close_on_merge: false` becomes a real choice.
 
 ## Goal

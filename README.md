@@ -4,7 +4,7 @@
 
 `worc-connect` is the tracker connector for [wastech-orchestrator](https://github.com/VladimirMakarevich/wastech-orchestrator) (`worc`). It runs beside `worc watch` in the same clone, polls an issue tracker for one repository, turns each work item a maintainer has explicitly gated into a worc task through the ingress worc already has (`tasks/preparing/` + `worc promote`), and writes the outcome back to the tracker: a state label (`worc:queued` → `worc:in-progress` → `worc:pr-open` → `worc:done`), a comment naming the task, the pull-request link, and the close on merge. GitHub is the first tracker, driven through the operator's own `gh` login. The core knows no tracker API; every tracker is one adapter behind an optional dependency.
 
-**Status: the skeleton runs.** The connector polls a real repository, applies the gate and prints what it would do — `worc-connect watch --once --dry-run` is safe to point at your own repository today. What it does **not** do yet is create a task or write anything back: the task builder, the handoff into worc and the write-back are the next phases. The plan and the design record are in [docs/backlog/](docs/backlog/README.md).
+**Status: the loop is complete, and the first real run is the operator's.** A gated issue becomes a promoted worc task, the connector follows it through `worc list` and the pull request it opened, and the issue shows where it got to: `worc:queued` → `worc:in-progress` → `worc:pr-open` → `worc:done`, with a comment at each step that matters and the issue closed when the pull request is merged. Every path is covered against a fake `gh` and a fake `worc`; **the end-to-end run against a real repository has not been recorded yet** — it needs your own `gh` login and a `worc watch` beside the connector. `worc-connect watch --once --dry-run` is still the safe first command and prints the task id, the branch and the label it would apply. The plan and the design record are in [docs/backlog/](docs/backlog/README.md).
 
 ## What it will do
 
@@ -14,6 +14,20 @@
 4. When the PR is merged — by anyone, any way — the connector closes the issue.
 
 Triage by an agent (analyse, reproduce, write a failing test) is an **optional** mechanic behind `triage.enabled`, off by default: the item first becomes a worc _triage_ task, and deterministic code builds the implementation task from the report, or writes back `needs-info` / `duplicate` / `declined`.
+
+## What each label means
+
+Exactly one of these is on an issue at a time; re-applying the one it already has does nothing. The prefix is yours to change (`write_back.labels_prefix`). The connector creates whichever of them the repository is missing, just before it first needs one, and never edits one that already exists.
+
+| Label | What it means |
+| --- | --- |
+| `worc:queued` | The task file has been promoted into worc's queue. The comment names the task id. |
+| `worc:in-progress` | worc is running the task. |
+| `worc:pr-open` | The task opened a pull request; the comment carries its URL. From here the connector only watches — it never pushes to the branch. |
+| `worc:done` | The pull request was merged (and, unless you set `close_on_merge: false`, the issue was closed), or worc finished the task without opening one. |
+| `worc:failed` | worc ended the task without a pull request, or the pull request was closed unmerged. The comment names the status and points at `worc status <task-id>` on the host. |
+
+**On `worc:failed`, the recovery is yours and it happens on the host**, with `worc status <task-id>` and `worc rerun`. The connector never re-queues, edits or reruns a task on its own, and it never copies worc's logs or diffs onto the issue — a public issue is not the place for them. A pull request closed without a merge and then reopened returns the issue to `worc:pr-open` on the next tick; the connector recomputes every pull-request-derived state from the request itself, every time.
 
 ## Two things to know before you run it
 
@@ -61,7 +75,7 @@ Every command takes `--home PATH` to point at a connector home other than `./.wo
 
 The rules every coding agent (and every human) follows here are in [AGENTS.md](AGENTS.md) and [.agents/rules/](.agents/rules/). The ones worth knowing as an operator:
 
-- **Into worc, one write:** a task file in `tasks/preparing/<id>.md`, promoted with `worc promote`. **Out of worc, one read:** `worc list --format json`. The connector never runs `git` in your clone, never writes into `tasks/pending/`, and never reads anything under `.worc/`.
+- **Into worc, one write:** a task file in `tasks/preparing/<id>.md`, promoted with `worc promote`. **Out of worc, one read:** `worc list --format json --all`. The connector never runs `git` in your clone, never writes into `tasks/pending/`, and never reads anything under `.worc/` — worc's own `config.yaml` included. The two things both sides must agree on, worc's `paths.tasks_dir` and its `validation.max_*` limits, are keys in the connector's own configuration instead; the [configuration reference](docs/configuration.md) says what to do if you changed either.
 - **It never pushes to a pull-request branch.** Once your task's PR exists it is yours to edit, retitle, reopen, merge any way GitHub allows and delete the branch of; the connector tracks it by number and recomputes its state from the PR itself on every tick.
 - **Its state is a cache.** `.worc-connect/state.db` is rebuilt from the tracker, `worc list` and the lifecycle folders on every tick, so deleting it is safe.
 - **No agent runtime.** The polling loop makes no model call and the package depends on no model SDK; everything that needs a model is a worc task, run inside worc's sandbox with worc's own containment and audit trail.
@@ -71,11 +85,14 @@ The rules every coding agent (and every human) follows here are in [AGENTS.md](A
 ```bash
 python -m venv .venv && . .venv/bin/activate    # PowerShell: .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
+pip install -r requirements-worc.txt            # worc itself, for the one suite that needs it
 pre-commit install && pre-commit install --hook-type pre-push
 ruff check . && ruff format --check . && mypy src && lint-imports && python tools/size_gate.py && pytest
 ```
 
 Windows, macOS and Linux are all release targets; the test suite runs natively on all three in CI and never launches the real `gh` or `worc` — every integration test drives a fake executable, so the suite needs no network and no credential.
+
+The second install is worc itself, and it is a **test** dependency: one suite feeds a generated task file to worc's real validation gate, because the connector has to produce a file worc accepts unchanged and worc rejects rather than repairs. Nothing under `src/` imports it, which is why it is not in `pyproject.toml` — worc is published to no package index, and a direct reference in the project's own metadata is refused by the build backend and by every index. Skip it and that suite skips with a note; the rest of the suite is unaffected.
 
 ## License
 

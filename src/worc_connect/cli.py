@@ -32,6 +32,7 @@ from worc_connect.core.state import (
     ItemRow,
     StateStore,
 )
+from worc_connect.core.worc_cli import WorcCommand
 from worc_connect.home import HOME_DIRNAME, ConnectorHome, ensure_gitignore_entry, render_config
 from worc_connect.trackers.base import AdapterFactory, TrackerAdapter
 
@@ -149,6 +150,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
             adapter=adapter,
             store=store,
             home=home,
+            worc=WorcCommand(command=config.worc.command, repo_path=config.worc.repo_path),
             on_tick=_reporter(config, dry_run=args.dry_run),
         )
         return watcher.run(once=args.once, dry_run=args.dry_run)
@@ -184,9 +186,10 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 def _row_line(row: ItemRow) -> str:
     """One cached row as a single line: identifiers and phase only, never the item's own text."""
+    pull_request = f"#{row.pr_number} {row.pr_url}" if row.pr_number else "-"
     return (
         f"item={row.item_id} seq={row.seq} phase={row.phase} "
-        f"task={row.task_id or '-'} branch={row.branch or '-'} pr={row.pr_url or '-'}"
+        f"task={row.task_id or '-'} branch={row.branch or '-'} pr={pull_request}"
     )
 
 
@@ -213,7 +216,7 @@ def _resolve_adapter(config: ConnectorConfig) -> TrackerAdapter:
             f'`pip install "worc-connect[{config.tracker}]"` (installed adapters: {available})'
         )
     factory: AdapterFactory = next(iter(matches)).load()
-    return factory(repo=config.repo)
+    return factory(repo=config.repo, labels_prefix=config.write_back.labels_prefix)
 
 
 def _configure_logging(home: ConnectorHome, *, dry_run: bool) -> None:
@@ -227,6 +230,11 @@ def _configure_logging(home: ConnectorHome, *, dry_run: bool) -> None:
         home.path.mkdir(parents=True, exist_ok=True)
         handlers.append(logging.FileHandler(home.log_path, encoding="utf-8"))
     logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=handlers, force=True)
+
+
+def _label(config: ConnectorConfig, state: str | None) -> str:
+    """The label a dry run says it would put on an item, spelled as the operator configured it."""
+    return "-" if state is None else f"{config.write_back.labels_prefix}{state}"
 
 
 def _reporter(config: ConnectorConfig, *, dry_run: bool) -> Callable[[TickReport], None]:
@@ -245,7 +253,9 @@ def _reporter(config: ConnectorConfig, *, dry_run: bool) -> Callable[[TickReport
         for planned in tick.actions:
             print(
                 f"plan: item={planned.item_id} action={planned.action} "
-                f"reason={planned.reason} url={planned.url}"
+                f"reason={planned.reason} task={planned.task_id or '-'} "
+                f"branch={planned.branch or '-'} "
+                f"label={_label(config, planned.state)} url={planned.url}"
             )
         print(f"plan: watermark={tick.watermark.isoformat() if tick.watermark else '-'}")
 

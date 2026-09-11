@@ -21,7 +21,11 @@ from worc_connect.config import (
     DEFAULT_BRANCH_PREFIX,
     DEFAULT_ID_PREFIX,
     DEFAULT_LABELS_PREFIX,
+    DEFAULT_MAX_LINE_BYTES,
+    DEFAULT_MAX_TASK_BYTES,
+    DEFAULT_MAX_TASK_LINES,
     DEFAULT_POLL_INTERVAL_SECONDS,
+    DEFAULT_TASKS_DIR,
     DEFAULT_TRIAGE_FLOW,
     DEFAULT_TRIGGER_LABEL,
     DEFAULT_WORC_COMMAND,
@@ -129,9 +133,16 @@ task:
   #   injection in an issue turns into merged code with nobody in between; worc's own policy and
   #   your review of the pull request are what should decide.
 
+# How to reach worc, and the two things both sides have to agree on. The connector never opens
+# worc's own configuration — its only read out of worc is `worc list` — so if you changed
+# `paths.tasks_dir` or any `validation.max_*` over there, restate the value here.
 worc:
   command: {DEFAULT_WORC_COMMAND} # resolved on PATH, launched as an argument list
   repo_path: . # the clone worc runs in, relative to the directory holding this home
+  tasks_dir: {DEFAULT_TASKS_DIR} # worc's `paths.tasks_dir`; the task is staged in its preparing/
+  max_task_bytes: {DEFAULT_MAX_TASK_BYTES} # worc's `validation.max_task_bytes`
+  max_task_lines: {DEFAULT_MAX_TASK_LINES} # worc's `validation.max_task_lines`
+  max_line_bytes: {DEFAULT_MAX_LINE_BYTES} # worc's `validation.max_line_bytes`
 
 write_back:
   labels_prefix: "{DEFAULT_LABELS_PREFIX}"

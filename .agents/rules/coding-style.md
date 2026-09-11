@@ -54,7 +54,7 @@
 
 - Run external CLIs (`gh`, `worc`) with an **argument list** (`subprocess.run([...])`), without `shell=True` and without interpolating item-derived strings. The executable is resolved with `shutil.which`, so `gh.exe` / `worc.cmd` launchers work on Windows.
 - Every `gh` call carries `--repo OWNER/REPO` from configuration.
-- Comment and close bodies travel through a file (`--body-file`), never through argv.
+- **Item-derived text never travels through argv.** A comment body goes to the tracker through a file (`--body-file`); an identifier reaches an argument list only after it has been proven to be a number. Where a tool offers no body-file form — `gh issue close` takes only `--comment` — the argument is a connector-authored template carrying nothing but a task id, a status name and URLs, and it stays that way.
 - Timeouts are mandatory for all external calls.
 - The child environment is the connector's own environment, forwarded as is: nothing added, nothing item-derived.
 

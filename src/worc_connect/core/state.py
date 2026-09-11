@@ -20,7 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final, Self
 
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 2
 
 _META_SCHEMA_VERSION: Final = "schema_version"
 
@@ -43,6 +43,7 @@ CREATE TABLE items (
     pr_number       INTEGER,
     pr_url          TEXT,
     pr_merged       INTEGER NOT NULL DEFAULT 0,
+    retrigger_armed INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT    NOT NULL,
     updated_at      TEXT    NOT NULL,
     PRIMARY KEY (tracker, item_id, seq)
@@ -95,6 +96,10 @@ class ItemRow:
     pr_number: int | None = None
     pr_url: str | None = None
     pr_merged: bool = False
+    # Whether the connector has seen the thing that turns a later trigger into a *new* request:
+    # the trigger label taken off, or the item closed by the connector itself. Without it a
+    # terminal row whose item still carries the label would start a fresh task on every tick.
+    retrigger_armed: bool = False
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -134,6 +139,7 @@ def _row(record: sqlite3.Row) -> ItemRow:
         pr_number=record["pr_number"],
         pr_url=record["pr_url"],
         pr_merged=bool(record["pr_merged"]),
+        retrigger_armed=bool(record["retrigger_armed"]),
     )
 
 
@@ -209,8 +215,8 @@ class StateStore:
             """
             INSERT INTO items (
                 tracker, item_id, seq, task_id, branch, phase, item_updated_at, last_status,
-                pr_number, pr_url, pr_merged, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                pr_number, pr_url, pr_merged, retrigger_armed, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(tracker, item_id, seq) DO UPDATE SET
                 task_id = excluded.task_id,
                 branch = excluded.branch,
@@ -220,6 +226,7 @@ class StateStore:
                 pr_number = excluded.pr_number,
                 pr_url = excluded.pr_url,
                 pr_merged = excluded.pr_merged,
+                retrigger_armed = excluded.retrigger_armed,
                 updated_at = excluded.updated_at
             """,
             (
@@ -234,6 +241,7 @@ class StateStore:
                 row.pr_number,
                 row.pr_url,
                 int(row.pr_merged),
+                int(row.retrigger_armed),
                 _iso(row.created_at),
                 _iso(row.updated_at),
             ),

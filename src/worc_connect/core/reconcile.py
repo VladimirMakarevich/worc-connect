@@ -1,0 +1,238 @@
+"""Moving one item's row forward, from the truth on disk, in worc's listing and on the code host.
+
+The row is a cache; this module is where it is corrected. Every tick it re-reads the three sources
+that actually know — the lifecycle folders in the clone, ``worc list --format json --all``, and the
+pull request the task opened — and moves the row to match. That is what makes a deleted database, a
+crash between writing a task file and promoting it, and a connector restarted mid-run all cost
+exactly one tick.
+
+Nothing here interprets worc's result beyond the vocabulary worc publishes, and nothing re-runs it.
+A task that is queued, running or finished is worc's; the connector follows it and never edits,
+re-queues or reruns it. Recovery is the operator's, on the host.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, replace
+from datetime import datetime
+from typing import Final
+
+from worc_connect.config import ConnectorConfig
+from worc_connect.core import builder, handoff
+from worc_connect.core.items import ItemState, WorkItem
+from worc_connect.core.naming import allocate_branch, allocate_task_id
+from worc_connect.core.pullrequest import PullRequestWatcher
+from worc_connect.core.sanitize import sanitize_title
+from worc_connect.core.state import ItemRow, Phase, StateStore
+from worc_connect.core.worc_cli import WorcCommand, status_token
+from worc_connect.core.writeback import STATE_PHASES
+from worc_connect.trackers.base import TrackerAdapter
+
+logger = logging.getLogger(__name__)
+
+# worc's task statuses, mapped to the connector's phases. The listing renders a status for humans,
+# so the mapping is applied to the leading token of the label, never to the whole string.
+_STATUS_PHASES: Final = {
+    "new": Phase.QUEUED,
+    "validated": Phase.QUEUED,
+    "preparing": Phase.QUEUED,
+    "pending": Phase.QUEUED,
+    "running": Phase.RUNNING,
+    "parked": Phase.RUNNING,
+    "done": Phase.DONE,
+    "failed": Phase.FAILED,
+    "manual_action_required": Phase.FAILED,
+}
+
+# The phases worc's own listing still has something to say about.
+_FOLLOWED_PHASES: Final = frozenset({Phase.QUEUED, Phase.RUNNING})
+
+# How many attempts at one item a rebuild looks for. An item re-triggered more times than this is
+# not a case worth a listing scan; the highest attempt found is what the row is rebuilt from.
+_MAX_REBUILT_SEQ: Final = 50
+
+
+@dataclass
+class Reconciler:
+    """One tick's view of worc, applied to the rows the connector holds.
+
+    Not frozen, unlike the records it moves: it holds the listing it read, which is the one piece
+    of per-tick state worth keeping. The listing is fetched at most once and only when a row
+    actually needs it, so a quiet tick — every row terminal, nothing staged — launches no worc at
+    all.
+    """
+
+    config: ConnectorConfig
+    store: StateStore
+    worc: WorcCommand
+    adapter: TrackerAdapter
+    _listing: dict[str, str] | None = None
+
+    def advance(self, row: ItemRow, item: WorkItem, *, now: datetime) -> ItemRow:
+        """Move ``row`` as far as this tick can and persist it; returns the row as it now stands.
+
+        A row the handoff moved this tick stops there. worc has not had a chance to record the task
+        yet, so asking its listing about it would be a second launch that could only answer "I have
+        never heard of it" — and the tick that hands an item over stays one ``promote`` and nothing
+        else.
+        """
+        moved = self._hand_over(row, item, now=now)
+        if moved.phase is not row.phase:
+            self.store.save(moved)
+            return moved
+        moved = self._follow_task(moved, now=now)
+        moved = PullRequestWatcher(adapter=self.adapter).advance(moved, now=now)
+        if moved != row:
+            self.store.save(moved)
+        return moved
+
+    def rebuild(self, item: WorkItem, state: ItemState, *, now: datetime) -> ItemRow:
+        """The row an item that already shows a connector state should have had.
+
+        Called when the database is gone but the item is not: the state label says how far this
+        item got, and worc's listing plus the queue folder say which task it got there with. The
+        point is not to restore every field — it is that an item the connector already handled
+        never gets a second task.
+        """
+        task_id, seq = self._latest_attempt(item.identifier)
+        branch = None if task_id is None else self._branch_for(task_id, item)
+        rebuilt = ItemRow(
+            tracker=self.config.tracker,
+            item_id=item.identifier,
+            seq=seq,
+            phase=STATE_PHASES[state],
+            created_at=now,
+            updated_at=now,
+            task_id=task_id,
+            branch=branch,
+            item_updated_at=item.updated_at,
+        )
+        self.store.save(rebuilt)
+        _log(rebuilt, "rebuild", str(state))
+        return rebuilt
+
+    def listing(self) -> dict[str, str]:
+        """worc's statuses for this tick, read once and reused by every row that needs them."""
+        if self._listing is None:
+            self._listing = self.worc.list_tasks()
+        return self._listing
+
+    # --- the handoff ---------------------------------------------------------------------------
+
+    def _hand_over(self, row: ItemRow, item: WorkItem, *, now: datetime) -> ItemRow:
+        """Get the task into worc, from wherever the previous tick left it."""
+        if row.phase is Phase.GATED:
+            row = self._stage(row, item, now=now)
+        if row.phase is Phase.STAGED:
+            row = self._promote(row, now=now)
+        return row
+
+    def _stage(self, row: ItemRow, item: WorkItem, *, now: datetime) -> ItemRow:
+        """Compose the task file and write it into worc's staging directory.
+
+        A branch already on the row means this attempt continues the previous one's pull request
+        rather than opening a second one, so the task is built with that branch as its ref.
+        """
+        draft = builder.build(item, self.config, seq=row.seq, branch_ref=row.branch)
+        handoff.stage(draft, self.config)
+        staged = replace(
+            row, task_id=draft.task_id, branch=draft.branch, phase=Phase.STAGED, updated_at=now
+        )
+        # Saved before the promote, not after: the id has to survive a crash in between, and it is
+        # what the next tick re-promotes rather than re-allocating.
+        self.store.save(staged)
+        _log(staged, "stage", "ok")
+        return staged
+
+    def _promote(self, row: ItemRow, *, now: datetime) -> ItemRow:
+        """Hand the staged file to worc, or work out what happened to a file that is gone."""
+        task_id = row.task_id
+        if task_id is None:  # pragma: no cover - a staged row always carries its task id
+            return row
+        if not handoff.task_path(self.config, task_id).is_file():
+            return self._resolve_missing(row, task_id, now=now)
+        outcome = handoff.promote(task_id, self.worc)
+        if outcome is handoff.PromoteOutcome.RETRY:
+            return row
+        _log(row, "promote", str(outcome))
+        return replace(row, phase=Phase.QUEUED, updated_at=now)
+
+    def _resolve_missing(self, row: ItemRow, task_id: str, *, now: datetime) -> ItemRow:
+        """Decide what a staged file that is no longer staged means."""
+        if handoff.is_handed_over(self.config, task_id) or task_id in self.listing():
+            _log(row, "promote", "already-pending")
+            return replace(row, phase=Phase.QUEUED, updated_at=now)
+        _log(row, "promote", "no-task")
+        return replace(row, phase=Phase.FAILED, last_status=None, updated_at=now)
+
+    # --- following worc ------------------------------------------------------------------------
+
+    def _follow_task(self, row: ItemRow, *, now: datetime) -> ItemRow:
+        """Read worc's own status for the task and move the row to match.
+
+        ``done`` deliberately does not end the row here: worc reports a task done from the moment
+        it published, so what that status means to the connector is "now watch the pull request".
+        """
+        task_id = row.task_id
+        if row.phase not in _FOLLOWED_PHASES or task_id is None:
+            return row
+        status = self.listing().get(task_id)
+        if status is None:
+            return self._unknown_to_worc(row, task_id, now=now)
+        phase = _STATUS_PHASES.get(status_token(status))
+        if phase is None or phase is Phase.DONE:
+            # An unknown status is not guessed at either: the row keeps its phase and the next tick
+            # asks again, which is the fail-closed direction for a vocabulary that may grow.
+            return replace(row, last_status=status, updated_at=now)
+        _log(row, "follow", status)
+        return replace(row, phase=phase, last_status=status, updated_at=now)
+
+    def _unknown_to_worc(self, row: ItemRow, task_id: str, *, now: datetime) -> ItemRow:
+        """A task worc's listing does not know: still a queued file, or gone for good.
+
+        Gone is what worc's validation gate rejecting the task looks like from outside its private
+        home — the file leaves ``pending/`` and no row is ever created — so it becomes a failure
+        the operator can see on the item rather than a task the connector waits on forever.
+        """
+        if handoff.is_handed_over(self.config, task_id):
+            return row
+        _log(row, "follow", "no-task")
+        return replace(row, phase=Phase.FAILED, last_status=None, updated_at=now)
+
+    # --- rebuilding ----------------------------------------------------------------------------
+
+    def _latest_attempt(self, item_id: str) -> tuple[str | None, int]:
+        """The highest-numbered task this item already has, from worc's listing and its queue."""
+        known = set(self.listing()) | {
+            path.stem for path in handoff.pending_dir(self.config).glob("*.md")
+        }
+        prefix = self.config.task.id_prefix
+        found: tuple[str | None, int] = (None, 1)
+        for seq in range(1, _MAX_REBUILT_SEQ + 1):
+            candidate = allocate_task_id(prefix, item_id, seq)
+            if candidate in known:
+                found = (candidate, seq)
+        return found
+
+    def _branch_for(self, task_id: str, item: WorkItem) -> str:
+        """The branch that task was published from, re-derived the way it was allocated.
+
+        Deterministic from the item's title, which is what lets a rebuilt row find the pull request
+        again. A title edited since the task was created is the one case this cannot recover, and
+        it costs a pull-request link, not a duplicate task.
+        """
+        title = sanitize_title(item.title, fallback=f"Issue #{item.identifier}")
+        return allocate_branch(self.config.task.branch_prefix, task_id, title)
+
+
+def phase_for_status(status: str) -> Phase | None:
+    """The connector phase worc's ``status`` label means, or ``None`` for one it does not know."""
+    return _STATUS_PHASES.get(status_token(status))
+
+
+def _log(row: ItemRow, action: str, result: str) -> None:
+    """One line per action, carrying identifiers only."""
+    logger.info(
+        "item=%s task=%s action=%s result=%s", row.item_id, row.task_id or "-", action, result
+    )

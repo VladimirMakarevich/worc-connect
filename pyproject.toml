@@ -35,6 +35,11 @@ dev = [
     "deptry>=0.20",        # dependency hygiene
     "types-PyYAML>=6.0",   # stubs for the configuration parser (mypy strict has no untyped imports)
 ]
+# worc itself is a test dependency and is deliberately NOT declared here: it is installed from its
+# repository (it is published to no index — the name `worc` on PyPI is an unrelated project), and a
+# direct reference in this file would be baked into the distribution's own metadata, where a package
+# index refuses it. It lives in `requirements-worc.txt`; CI installs it next to this extra, and the
+# one suite that needs it skips where it is absent.
 
 [project.scripts]
 worc-connect = "worc_connect.cli:main"

@@ -4,6 +4,11 @@ Two families of assertion live here. The first is about the decision: who gets a
 watermark becomes, and that a dry run changes nothing. The second is about running as a process:
 one watcher per clone, a stop that is a file rather than a signal, and a tracker failure that costs
 one tick and no state.
+
+A real tick now hands a gated item to worc, so every test in this file needs the fake worc first on
+``PATH`` — including the ones that never reach it. The host that runs the suite usually has a real
+worc installed, and a test that resolved it would be launching the operator's orchestrator against
+a temporary directory.
 """
 
 from __future__ import annotations
@@ -15,14 +20,23 @@ from pathlib import Path
 
 import pytest
 
-from support import StubAdapter, connector_config, work_item
+from support import FakeWorc, StubAdapter, connector_config, work_item
 from worc_connect.core.loop import WATERMARK_OVERLAP, Action, TickReport, Watcher
 from worc_connect.core.state import Phase, StateStore, read_watermark
+from worc_connect.core.worc_cli import WorcCommand
 from worc_connect.home import ConnectorHome
 from worc_connect.trackers.base import TrackerAdapter, TrackerAuth, TrackerRateLimited
 
+pytestmark = pytest.mark.slow
+
 NOW = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
 UPDATED = datetime(2026, 9, 10, 10, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def worc_on_path(fake_worc: FakeWorc) -> FakeWorc:
+    """Put the fake worc on ``PATH`` for every test here, so the host's own can never be reached."""
+    return fake_worc
 
 
 def watcher(
@@ -46,6 +60,7 @@ def watcher(
         adapter=adapter,
         store=store,
         home=home,
+        worc=WorcCommand(command="worc", repo_path=home.clone_path),
         on_tick=on_tick or (lambda report: None),
         now_fn=lambda: NOW,
         sleep_fn=sleep,
@@ -63,7 +78,7 @@ def test_the_stub_adapter_satisfies_the_tracker_contract() -> None:
     assert isinstance(StubAdapter(), TrackerAdapter)
 
 
-def test_a_gated_item_gets_a_row_and_a_planned_action(
+def test_a_gated_item_is_handed_to_worc_in_the_tick_that_admits_it(
     home: ConnectorHome, store: StateStore
 ) -> None:
     adapter = StubAdapter(items=[work_item(updated_at=UPDATED)])
@@ -74,7 +89,8 @@ def test_a_gated_item_gets_a_row_and_a_planned_action(
     assert report.counted(Action.STAGE) == 1
     row = store.latest_row("github", "142")
     assert row is not None
-    assert (row.phase, row.seq, row.task_id) == (Phase.GATED, 1, None)
+    assert (row.phase, row.seq, row.task_id) == (Phase.QUEUED, 1, "gh-142")
+    assert row.branch == "worc/gh-142-signup-form-accepts-foo-as-an-email"
     assert row.item_updated_at == UPDATED
 
 
@@ -182,10 +198,9 @@ def test_every_action_is_logged_as_one_line_with_the_identifiers(
     with caplog.at_level(logging.INFO, logger="worc_connect.core.loop"):
         watcher(home, adapter, store).tick(dry_run=False)
 
-    line = next(line for line in caplog.text.splitlines() if "action=" in line)
+    line = next(line for line in caplog.text.splitlines() if "action=stage-task" in line)
     assert "item=142" in line
-    assert "task=-" in line
-    assert "action=stage-task" in line
+    assert "task=gh-142" in line
     assert "result=trigger-label" in line
 
 
@@ -279,6 +294,7 @@ def test_a_stop_sentinel_written_mid_sleep_ends_the_loop(
         adapter=adapter,
         store=store,
         home=home,
+        worc=WorcCommand(command="worc", repo_path=home.clone_path),
         now_fn=lambda: NOW,
         sleep_fn=sleep,
     )
@@ -318,6 +334,7 @@ def test_a_throttled_tracker_costs_one_tick_and_no_state(
         adapter=adapter,
         store=store,
         home=home,
+        worc=WorcCommand(command="worc", repo_path=home.clone_path),
         now_fn=lambda: NOW,
         sleep_fn=sleep,
     )

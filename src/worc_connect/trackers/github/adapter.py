@@ -1,20 +1,39 @@
-"""The GitHub adapter's read side: issues and pull requests, normalized.
+"""The GitHub adapter: everything the connector does to an issue, and nothing else.
 
 Nothing above this module knows that GitHub calls a work item an issue, that its identifier is a
-number, or that a label is an object with a name. Everything that shape implies is decided here and
-nowhere else, and anything the payload does not look like is an infrastructure failure rather than a
-guess — an unreadable listing costs one tick and changes no state.
+number, or that a state is a label. Both directions of that mapping live here: the reads that
+produce a normalized item or pull request, and the writes that publish a connector state, post a
+comment and close an issue.
+
+Two disciplines are visible in the call shapes and are not negotiable. A comment body travels as a
+**file**, never as an argument — an issue is written by strangers and the habit of putting text in
+argv is one worth never starting. And the identifier is proven to be a number before it reaches an
+argument list, which is what makes it the one item-derived value the connector ever passes to a
+command.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Any, Final
+from datetime import datetime
+from pathlib import Path
+from typing import Final
 
-from worc_connect.core.items import PullRequest, PullRequestState, WorkItem, WorkItemState
+from worc_connect.core.items import (
+    ItemState,
+    PullRequest,
+    PullRequestState,
+    WorkItem,
+    WorkItemState,
+)
 from worc_connect.trackers.base import TrackerUnavailable
 from worc_connect.trackers.github.gh import GhCommand
+from worc_connect.trackers.github.payloads import (
+    entries,
+    pull_request,
+    search_stamp,
+    work_item,
+)
 
 # The fields every issue read asks for. `state` is requested only where it can differ: a listing is
 # pinned to open issues, so asking the listing for it would be one more field to keep in step.
@@ -31,6 +50,19 @@ _ISSUE_PAGE_LIMIT: Final = 200
 # see them all, small enough that a surprising answer stays readable.
 _PULL_REQUEST_PAGE_LIMIT: Final = 10
 
+# Repositories rarely carry more than a few dozen labels, and the listing is read once per process
+# to find which of the connector's own are missing.
+_LABEL_PAGE_LIMIT: Final = 200
+
+# What a label the connector created says about itself. Fixed text, because a label description is
+# repository furniture an operator may edit freely afterwards.
+_LABEL_DESCRIPTION: Final = "Managed by worc-connect"
+
+# The label suffixes this adapter recognises as a connector state. Built once: a label under the
+# prefix that is not one of them is somebody else's, and reading it as a state would let a hand
+# written label drive the connector.
+_STATE_NAMES: Final = {str(state) for state in ItemState}
+
 # GitHub's search orders by relevance unless told otherwise, and the watermark depends on the order:
 # the loop advances it to the newest update in the page, which is only safe if a truncated page can
 # have cut off the newer end alone.
@@ -39,15 +71,16 @@ _SORT_OLDEST_UPDATE_FIRST: Final = "sort:updated-asc"
 
 @dataclass(frozen=True)
 class GitHubAdapter:
-    """The GitHub reads the core performs, over the operator's own ``gh`` login."""
+    """The GitHub calls the core performs, over the operator's own ``gh`` login."""
 
     command: GhCommand
+    labels_prefix: str
 
     def list_items(self, since: datetime | None) -> list[WorkItem]:
         """The repository's open issues updated at or after ``since``, oldest update first."""
         search = _SORT_OLDEST_UPDATE_FIRST
         if since is not None:
-            search = f"updated:>={_search_stamp(since)} {search}"
+            search = f"updated:>={search_stamp(since)} {search}"
         payload = self.command.read_json(
             "issue",
             "list",
@@ -60,7 +93,7 @@ class GitHubAdapter:
             "--search",
             search,
         )
-        return [_work_item(entry, state=WorkItemState.OPEN) for entry in _entries(payload)]
+        return [work_item(entry, state=WorkItemState.OPEN) for entry in entries(payload)]
 
     def get_item(self, identifier: str) -> WorkItem:
         """One issue by number, open or closed.
@@ -69,12 +102,12 @@ class GitHubAdapter:
         item-derived value the connector ever passes to a command, and a number cannot be read as a
         flag, a path or a search expression whatever the tool's parser does with it.
         """
-        if not identifier.isdigit():
-            raise TrackerUnavailable(f"not a GitHub issue number: {identifier!r}")
-        payload = self.command.read_json("issue", "view", identifier, "--json", _ISSUE_VIEW_FIELDS)
+        payload = self.command.read_json(
+            "issue", "view", _number(identifier), "--json", _ISSUE_VIEW_FIELDS
+        )
         if not isinstance(payload, dict):
             raise TrackerUnavailable("`gh issue view` returned no issue object")
-        return _work_item(payload, state=None)
+        return work_item(payload, state=None)
 
     def find_pull_request(self, branch: str) -> PullRequest | None:
         """The pull request opened for ``branch`` in any state, or ``None`` while there is none.
@@ -95,7 +128,7 @@ class GitHubAdapter:
             "--json",
             _PULL_REQUEST_FIELDS,
         )
-        requests = [_pull_request(entry) for entry in _entries(payload)]
+        requests = [pull_request(entry) for entry in entries(payload)]
         if not requests:
             return None
         return next(
@@ -103,140 +136,85 @@ class GitHubAdapter:
             requests[0],
         )
 
+    def get_pull_request(self, number: int) -> PullRequest:
+        """One pull request by number, however the owner has edited it since.
 
-def build_adapter(*, repo: str) -> GitHubAdapter:
-    """Build the adapter the ``worc_connect.trackers`` entry point for ``github`` resolves to."""
-    return GitHubAdapter(command=GhCommand(repo=repo))
+        The number is the connector's own stored value, never anything an item wrote, and reading
+        by it is what survives a retitled request, a squash merge and a deleted branch.
+        """
+        payload = self.command.read_json("pr", "view", str(number), "--json", _PULL_REQUEST_FIELDS)
+        if not isinstance(payload, dict):
+            raise TrackerUnavailable("`gh pr view` returned no pull-request object")
+        return pull_request(payload)
 
+    def current_state(self, item: WorkItem) -> ItemState | None:
+        """The connector-owned state the issue currently carries, read from its own labels.
 
-def _search_stamp(since: datetime) -> str:
-    """``since`` as GitHub's search syntax wants it: UTC, second precision, no offset notation."""
-    return since.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _entries(payload: Any) -> list[dict[str, Any]]:
-    """The payload as a list of objects, or :class:`TrackerUnavailable`."""
-    if not isinstance(payload, list) or any(not isinstance(entry, dict) for entry in payload):
-        raise TrackerUnavailable("`gh` returned something other than a list of objects")
-    entries: list[dict[str, Any]] = payload
-    return entries
-
-
-def _work_item(entry: dict[str, Any], *, state: WorkItemState | None) -> WorkItem:
-    """One issue payload as a :class:`~worc_connect.core.items.WorkItem`.
-
-    ``state`` is supplied where the call pinned it and read from the payload otherwise, so a listing
-    of open issues needs no field for something the query already decided.
-    """
-    number = entry.get("number")
-    if not isinstance(number, int):
-        raise TrackerUnavailable("an issue payload carries no number")
-    return WorkItem(
-        identifier=str(number),
-        title=_string(entry, "title"),
-        body=_string(entry, "body"),
-        author=_author(entry),
-        labels=_labels(entry),
-        state=state if state is not None else _item_state(entry),
-        updated_at=_timestamp(entry.get("updatedAt"), field="updatedAt"),
-        url=_string(entry, "url"),
-    )
-
-
-def _string(entry: dict[str, Any], field: str) -> str:
-    """A string field, with an absent or null value read as empty rather than as a failure.
-
-    GitHub renders an empty issue body as ``null``, and an item with no body is an ordinary item —
-    the builder decides what an empty body means for a task, not the transport.
-    """
-    value = entry.get(field)
-    if value is None:
-        return ""
-    if not isinstance(value, str):
-        raise TrackerUnavailable(f"an issue payload's `{field}` is not a string")
-    return value
-
-
-def _author(entry: dict[str, Any]) -> str:
-    """The author's login, or empty when GitHub reports none.
-
-    An author the API cannot name (a deleted account) reads as empty, which an author allow-list can
-    only ever reject — the fail-closed direction for a value the gate depends on.
-    """
-    author = entry.get("author")
-    if not isinstance(author, dict):
-        return ""
-    login = author.get("login")
-    return login if isinstance(login, str) else ""
-
-
-def _labels(entry: dict[str, Any]) -> tuple[str, ...]:
-    """The label names of an issue; anything without a usable name is dropped.
-
-    Dropping is safe in the direction that matters: a label the adapter cannot read is a label the
-    gate will not match, so a malformed payload can only ever fail to admit an item.
-    """
-    labels = entry.get("labels")
-    if not isinstance(labels, list):
-        return ()
-    names: list[str] = []
-    for label in labels:
-        if isinstance(label, dict):
-            name = label.get("name")
-            if isinstance(name, str) and name:
-                names.append(name)
-    return tuple(names)
-
-
-def _item_state(entry: dict[str, Any]) -> WorkItemState:
-    """An issue's own state, with anything but an explicit ``OPEN`` read as closed."""
-    value = entry.get("state")
-    return WorkItemState.OPEN if str(value).upper() == "OPEN" else WorkItemState.CLOSED
-
-
-def _timestamp(value: Any, *, field: str) -> datetime:
-    """A required timestamp as a timezone-aware datetime."""
-    parsed = _optional_timestamp(value, field=field)
-    if parsed is None:
-        raise TrackerUnavailable(f"a payload carries no `{field}` timestamp")
-    return parsed
-
-
-def _optional_timestamp(value: Any, *, field: str) -> datetime | None:
-    """A timestamp that may legitimately be absent — an unmerged pull request's merge time."""
-    if value is None or value == "":
+        An unknown label under the prefix reads as no state at all, which is the fail-closed
+        direction: the connector then publishes the state it believes in rather than trusting a
+        name it does not recognise.
+        """
+        for label in item.labels:
+            if label.startswith(self.labels_prefix):
+                name = label[len(self.labels_prefix) :]
+                if name in _STATE_NAMES:
+                    return ItemState(name)
         return None
-    if not isinstance(value, str):
-        raise TrackerUnavailable(f"a payload's `{field}` is not a timestamp")
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise TrackerUnavailable(f"a payload's `{field}` is not a readable timestamp") from exc
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+    def set_state(self, identifier: str, state: ItemState, *, previous: ItemState | None) -> None:
+        """Move the issue to ``state`` in one edit, so it never carries two states or none."""
+        arguments = ["issue", "edit", _number(identifier)]
+        if previous is not None and previous is not state:
+            arguments += ["--remove-label", self.label_for(previous)]
+        arguments += ["--add-label", self.label_for(state)]
+        self.command.run(*arguments)
+
+    def comment(self, identifier: str, body_path: Path) -> None:
+        """Post a comment whose body is read from a file, never composed into an argument."""
+        self.command.run("issue", "comment", _number(identifier), "--body-file", str(body_path))
+
+    def close(self, identifier: str, message: str) -> None:
+        """Close the issue with a connector-authored closing message.
+
+        ``gh issue close`` has no body-file form, so the message is an argument here. It is safe to
+        be one for the same reason the label names are: it is a template this package wrote, and
+        the only values interpolated into it are a task id and a URL.
+        """
+        self.command.run("issue", "close", _number(identifier), "--comment", message)
+
+    def ensure_labels(self, states: tuple[ItemState, ...]) -> None:
+        """Create the state labels the repository is missing, and leave the ones it has alone.
+
+        Existing labels are never edited: their colour and description belong to whoever set them
+        up, and a connector that reset them on every start would be fighting the maintainers.
+        """
+        payload = self.command.read_json(
+            "label", "list", "--limit", str(_LABEL_PAGE_LIMIT), "--json", "name"
+        )
+        present = {
+            entry.get("name") for entry in entries(payload) if isinstance(entry.get("name"), str)
+        }
+        for state in states:
+            name = self.label_for(state)
+            if name not in present:
+                self.command.run("label", "create", name, "--description", _LABEL_DESCRIPTION)
+
+    def label_for(self, state: ItemState) -> str:
+        """The label name this tracker publishes ``state`` as."""
+        return f"{self.labels_prefix}{state}"
 
 
-def _pull_request(entry: dict[str, Any]) -> PullRequest:
-    """One pull-request payload as a :class:`~worc_connect.core.items.PullRequest`."""
-    number = entry.get("number")
-    if not isinstance(number, int):
-        raise TrackerUnavailable("a pull-request payload carries no number")
-    return PullRequest(
-        number=number,
-        url=_string(entry, "url"),
-        state=_pull_request_state(entry),
-        merged_at=_optional_timestamp(entry.get("mergedAt"), field="mergedAt"),
-    )
+def _number(identifier: str) -> str:
+    """``identifier`` proven to be an issue number before it reaches an argument list.
 
-
-def _pull_request_state(entry: dict[str, Any]) -> PullRequestState:
-    """A pull request's state, with an unknown value read as closed.
-
-    Closed is the conservative reading: it stops the connector from treating a state it does not
-    understand as an open request it should keep waiting on, or as a merge it should act on.
+    The one item-derived value the connector passes to a command, and a number cannot be read as a
+    flag, a path or a search expression by any parser.
     """
-    value = str(entry.get("state")).upper()
-    if value == "OPEN":
-        return PullRequestState.OPEN
-    if value == "MERGED":
-        return PullRequestState.MERGED
-    return PullRequestState.CLOSED
+    if not identifier.isdigit():
+        raise TrackerUnavailable(f"not a GitHub issue number: {identifier!r}")
+    return identifier
+
+
+def build_adapter(*, repo: str, labels_prefix: str) -> GitHubAdapter:
+    """Build the adapter the ``worc_connect.trackers`` entry point for ``github`` resolves to."""
+    return GitHubAdapter(command=GhCommand(repo=repo), labels_prefix=labels_prefix)

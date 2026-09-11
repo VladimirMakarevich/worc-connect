@@ -30,19 +30,22 @@ def test_the_github_adapter_registers_itself_in_the_group() -> None:
     assert "github" in installed_adapters()
 
 
-def test_the_registered_factory_takes_only_a_repository_and_by_keyword() -> None:
+def test_the_registered_factory_takes_the_repository_and_the_prefix_by_keyword() -> None:
     factory = entry_points(group=ENTRY_POINT_GROUP).select(name="github")["github"].load()
 
     signature = inspect.signature(factory)
 
-    assert list(signature.parameters) == ["repo"]
-    assert signature.parameters["repo"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert list(signature.parameters) == ["repo", "labels_prefix"]
+    assert all(
+        parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        for parameter in signature.parameters.values()
+    )
 
 
 def test_the_registered_factory_builds_something_the_core_can_drive() -> None:
     factory = entry_points(group=ENTRY_POINT_GROUP).select(name="github")["github"].load()
 
-    assert isinstance(factory(repo="OWNER/REPO"), TrackerAdapter)
+    assert isinstance(factory(repo="OWNER/REPO", labels_prefix="worc:"), TrackerAdapter)
 
 
 def test_the_github_extra_exists_so_the_documented_install_works() -> None:

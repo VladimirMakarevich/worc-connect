@@ -184,6 +184,50 @@ def test_an_id_prefix_that_cannot_build_a_worc_task_id_is_refused(
         load(path)
 
 
+def test_worcs_defaults_stand_when_the_operator_restates_nothing(home: ConnectorHome) -> None:
+    document = base_config()
+    del document["worc"]["tasks_dir"]
+    path = write_config(home, document)
+
+    config = load(path)
+
+    assert config.worc.tasks_dir == "tasks"
+    assert config.worc.max_task_bytes == 262_144
+    assert config.worc.max_task_lines == 5_000
+    assert config.worc.max_line_bytes == 8_192
+
+
+def test_the_limits_worc_enforces_can_be_restated(home: ConnectorHome) -> None:
+    document = base_config()
+    document["worc"] |= {"max_task_bytes": 1024, "max_task_lines": 50, "max_line_bytes": 200}
+    path = write_config(home, document)
+
+    config = load(path)
+
+    assert (config.worc.max_task_bytes, config.worc.max_task_lines) == (1024, 50)
+    assert config.worc.max_line_bytes == 200
+
+
+@pytest.mark.parametrize(
+    "tasks_dir", ["/abs/tasks", "../tasks", "tasks/../other", "tasks\\sub", "C:/tasks", ""]
+)
+def test_a_tasks_dir_outside_the_clone_is_refused(home: ConnectorHome, tasks_dir: str) -> None:
+    document = base_config()
+    document["worc"]["tasks_dir"] = tasks_dir
+    path = write_config(home, document)
+
+    with pytest.raises(ConfigError, match=r"worc\.tasks_dir"):
+        load(path)
+
+
+def test_a_nested_tasks_dir_is_accepted(home: ConnectorHome) -> None:
+    document = base_config()
+    document["worc"]["tasks_dir"] = "ops/tasks"
+    path = write_config(home, document)
+
+    assert load(path).worc.tasks_dir == "ops/tasks"
+
+
 def test_a_repo_path_that_is_not_a_directory_is_refused(home: ConnectorHome) -> None:
     document = base_config()
     document["worc"]["repo_path"] = "not-there"

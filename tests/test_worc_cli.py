@@ -142,6 +142,38 @@ def test_a_pending_entry_without_a_database_row_still_counts(
     }
 
 
+def test_a_queued_file_worc_could_not_parse_is_skipped_not_refused(
+    clone: Path, fake_worc: FakeWorc
+) -> None:
+    # worc lists such a file under its name with no id. It cannot be one of the connector's tasks —
+    # their ids come from the connector's own builder — so it must not stop the tick either.
+    fake_worc.configure(
+        list={
+            "stdout": json.dumps(
+                [
+                    {"task_id": None, "status": "pending", "file": "typo.md", "rank": "1"},
+                    {"task_id": "gh-3", "status": "pending", "file": "gh-3.md", "rank": "2"},
+                ]
+            )
+        }
+    )
+
+    assert WorcCommand(command="worc", repo_path=clone).list_tasks() == {
+        "gh-3": ListedTask("pending")
+    }
+
+
+def test_a_listed_task_without_a_status_is_refused_not_skipped(
+    clone: Path, fake_worc: FakeWorc
+) -> None:
+    # Skipping it would make a task the connector follows read as one worc never heard of, which
+    # ends the row as failed on the item; refusing costs one tick and changes nothing.
+    fake_worc.configure(list={"stdout": json.dumps([{"task_id": "gh-1", "status": None}])})
+
+    with pytest.raises(WorcUnavailable):
+        WorcCommand(command="worc", repo_path=clone).list_tasks()
+
+
 def test_output_that_is_not_json_stops_the_tick(clone: Path, fake_worc: FakeWorc) -> None:
     fake_worc.configure(list={"stdout": "list: no tasks\n"})
 

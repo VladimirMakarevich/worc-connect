@@ -450,3 +450,14 @@ def test_a_followed_item_that_cannot_be_read_costs_its_row_one_tick(
     assert row is not None
     assert row.phase is Phase.QUEUED
     assert "item=142 task=gh-142 action=fetch result=skipped-TrackerUnavailable" in caplog.text
+
+
+def test_a_dry_run_reads_but_never_creates_labels(home: ConnectorHome) -> None:
+    adapter = StubAdapter(items=[work_item(updated_at=UPDATED)])
+    read_only = StateStore.read_only(home.state_path)
+
+    watcher(home, adapter, read_only).tick(dry_run=True)
+
+    assert adapter.ensured == []
+    assert adapter.ensured_triggers == []
+    read_only.close()

@@ -7,6 +7,8 @@ made — is asserted against the recording of the fake ``gh`` rather than inferr
 
 from __future__ import annotations
 
+import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
@@ -172,10 +174,13 @@ def test_a_dry_run_repeats_a_stranger_s_text_nowhere(
 @pytest.mark.slow
 @requires_installed_distribution
 def test_a_single_pass_records_the_item_and_its_own_log(
-    home: ConnectorHome, fake_gh: FakeGh
+    home: ConnectorHome, fake_gh: FakeGh, fake_worc: FakeWorc
 ) -> None:
     write_config(home, base_config())
     fake_gh.respond("issue list", payload=[issue_payload(work_item("142"))])
+    fake_gh.respond("label list", payload=[])
+    for verb in ("label create", "issue edit", "issue comment"):
+        fake_gh.respond(verb, stdout="")
 
     code = main(["watch", "--home", str(home.path), "--once"])
 
@@ -185,6 +190,16 @@ def test_a_single_pass_records_the_item_and_its_own_log(
     store = StateStore.read_only(home.state_path)
     assert [row.item_id for row in store.rows()] == ["142"]
     store.close()
+    # The first tick of a process creates the labels — the trigger label the gate is configured
+    # with included, since nothing can be gated on a fresh repository until it exists.
+    created = [call[2] for call in fake_gh.calls_for("label create")]
+    assert "worc" in created and "worc:queued" in created
+    assert "worc:needs-info" not in created  # triage is off in this configuration
+    # The log is bounded: rotated by size rather than appended forever.
+    handlers = logging.getLogger().handlers
+    rotating = [handler for handler in handlers if isinstance(handler, RotatingFileHandler)]
+    assert len(rotating) == 1
+    assert rotating[0].maxBytes > 0 and rotating[0].backupCount > 0
 
 
 @pytest.mark.slow

@@ -25,8 +25,14 @@ from worc_connect.core.naming import allocate_branch, allocate_task_id
 from worc_connect.core.sanitize import sanitize_title
 from worc_connect.core.state import TERMINAL_PHASES, ItemRow, Phase, Stage, StateStore
 from worc_connect.core.triage import Report, Verdict
-from worc_connect.core.worc_cli import REJECTED_STATUS, ListedTask, WorcCommand, status_token
-from worc_connect.core.writeback import STATE_PHASES
+from worc_connect.core.worc_cli import (
+    DONE_STATUS,
+    REJECTED_STATUS,
+    ListedTask,
+    WorcCommand,
+    status_token,
+)
+from worc_connect.core.writeback import STATE_PHASES, TRIAGE_STATES
 from worc_connect.home import ConnectorHome
 from worc_connect.trackers.base import TrackerAdapter
 
@@ -51,11 +57,6 @@ _STATUS_PHASES: Final = {
 
 # The phases worc's own listing still has something to say about.
 _FOLLOWED_PHASES: Final = frozenset({Phase.QUEUED, Phase.RUNNING})
-
-# The status worc gives a task from the moment it published. For an implementation task that means
-# "now watch the pull request"; for a triage task, which publishes nothing, it means the report is
-# there to read.
-_DONE_STATUS: Final = "done"
 
 # How many attempts at one item a rebuild looks for. An item re-triggered more times than this is
 # not a case worth a listing scan; the highest attempt found is what the row is rebuilt from.
@@ -120,16 +121,24 @@ class Reconciler:
             self.store.save(moved)
         return moved
 
-    def rebuild(self, item: WorkItem, state: ItemState, *, now: datetime) -> ItemRow:
-        """The row an item that already shows a connector state should have had.
+    def rebuild(
+        self, item: WorkItem, state: ItemState, *, now: datetime, persist: bool = True
+    ) -> ItemRow | None:
+        """The row an item that already shows a connector state should have had, or ``None``.
 
         Called when the database is gone but the item is not: the state label says how far this
         item got, and worc's listing plus the queue folder say which task it got there with. The
         point is not to restore every field — it is that an item the connector already handled
-        never gets a second task.
+        never gets a second task. ``None`` when no task is known for the item at all: a label with
+        nothing behind it is not the connector's — written by hand, or worc's own records gone —
+        and adopting it would be trusting a name. ``persist`` is off for a dry run, which plans
+        from the row the real tick would rebuild without writing it anywhere.
         """
         task_id, seq = self._latest_attempt(item.identifier)
-        branch = None if task_id is None else self._branch_for(task_id, item)
+        if task_id is None:
+            logger.info("item=%s task=- action=rebuild result=no-task", item.identifier)
+            return None
+        stage = self._rebuilt_stage(task_id, state)
         rebuilt = ItemRow(
             tracker=self.config.tracker,
             item_id=item.identifier,
@@ -138,10 +147,15 @@ class Reconciler:
             created_at=now,
             updated_at=now,
             task_id=task_id,
-            branch=branch,
+            branch=self._branch_for(task_id, item),
             item_updated_at=item.updated_at,
+            stage=stage,
+            research_task_id=(
+                None if stage is Stage.RESEARCH else self._triage_before(item.identifier, seq)
+            ),
         )
-        self.store.save(rebuilt)
+        if persist:
+            self.store.save(rebuilt)
         _log(rebuilt, "rebuild", str(state))
         return rebuilt
 
@@ -168,6 +182,10 @@ class Reconciler:
         rather than opening a second one, so the task is built with that branch as its ref.
         """
         draft = self._draft(row, item)
+        if row.stage is Stage.RESEARCH:
+            # Marked before the file exists, so no crash can leave a promoted triage task without
+            # the one signal a rebuilt row has that it is following a triage task.
+            triage.mark_triage_task(self.home.triage_path, draft.task_id)
         handoff.stage(draft, self.config)
         staged = replace(
             row, task_id=draft.task_id, branch=draft.branch, phase=Phase.STAGED, updated_at=now
@@ -241,12 +259,13 @@ class Reconciler:
         """Decide what a staged file that is no longer staged means.
 
         The file on disk is consulted before worc's listing so that the common answer — worc holds
-        it — costs no launch at all.
+        it — costs no launch at all; and the listing that decides the rest is read after the disk,
+        so a file worc claimed between the two reads is worc's and not a task that vanished.
         """
         if handoff.is_handed_over(self.config, task_id):
             _log(row, "promote", "already-pending")
             return replace(row, phase=Phase.QUEUED, updated_at=now)
-        entry = self.listing().get(task_id)
+        entry = self._relisted().get(task_id)
         if entry is None:
             _log(row, "promote", "no-task")
             return replace(row, phase=Phase.FAILED, last_status=None, updated_at=now)
@@ -269,38 +288,53 @@ class Reconciler:
     # --- following worc ------------------------------------------------------------------------
 
     def _follow_task(self, row: ItemRow, *, now: datetime) -> ItemRow:
-        """Read worc's own status for the task and move the row to match.
-
-        ``done`` deliberately does not end the row here: worc reports a task done from the moment
-        it published, so what that status means to the connector is "now watch the pull request".
-        """
+        """Read worc's own status for the task and move the row to match."""
         task_id = row.task_id
         if row.phase not in _FOLLOWED_PHASES or task_id is None:
             return row
         entry = self.listing().get(task_id)
         if entry is None:
             return self._unknown_to_worc(row, task_id, now=now)
+        return self._from_entry(row, entry, now=now)
+
+    def _from_entry(self, row: ItemRow, entry: ListedTask, *, now: datetime) -> ItemRow:
+        """The row as worc's own entry for its task makes it.
+
+        ``done`` deliberately does not end the row here: worc reports a task done from the moment
+        it published, so what that status means to the connector is "now watch the pull request".
+        An unknown status is not guessed at either: the row keeps its phase and the next tick asks
+        again, which is the fail-closed direction for a vocabulary that may grow.
+        """
         if status_token(entry.status) == REJECTED_STATUS:
             return self._refused(row, entry, now=now)
         phase = _STATUS_PHASES.get(status_token(entry.status))
         if phase is None or phase is Phase.DONE:
-            # An unknown status is not guessed at either: the row keeps its phase and the next tick
-            # asks again, which is the fail-closed direction for a vocabulary that may grow.
             return replace(row, last_status=entry.status, updated_at=now)
         _log(row, "follow", entry.status)
         return replace(row, phase=phase, last_status=entry.status, updated_at=now)
 
     def _unknown_to_worc(self, row: ItemRow, task_id: str, *, now: datetime) -> ItemRow:
-        """A task worc's listing does not know: still a queued file, or gone for good.
+        """A task worc's listing does not know: still a queued file, claimed since, or gone.
 
         Gone is what worc's validation gate rejecting the task looks like from outside its private
         home — the file leaves ``pending/`` and no row is ever created — so it becomes a failure
-        the operator can see on the item rather than a task the connector waits on forever.
+        the operator can see on the item rather than a task the connector waits on forever. But the
+        listing may predate the look at the disk, and a file that left ``pending/`` in between is a
+        task worc claimed, not one that vanished: the listing is read once more, after the disk,
+        before anything terminal is concluded.
         """
         if handoff.is_handed_over(self.config, task_id):
             return row
+        entry = self._relisted().get(task_id)
+        if entry is not None:
+            return self._from_entry(row, entry, now=now)
         _log(row, "follow", "no-task")
         return replace(row, phase=Phase.FAILED, last_status=None, updated_at=now)
+
+    def _relisted(self) -> dict[str, ListedTask]:
+        """worc's entries read again, for a conclusion the cached listing is too old to carry."""
+        self._listing = self.worc.list_tasks()
+        return self._listing
 
     # --- the triage step -------------------------------------------------------------------------
 
@@ -312,7 +346,7 @@ class Reconciler:
         """
         if row.phase in TERMINAL_PHASES:
             return row
-        if row.last_status is None or status_token(row.last_status) != _DONE_STATUS:
+        if row.last_status is None or status_token(row.last_status) != DONE_STATUS:
             if row != self.store.latest_row(row.tracker, row.item_id):
                 self.store.save(row)
             return row
@@ -397,6 +431,28 @@ class Reconciler:
             if candidate in known:
                 found = (candidate, seq)
         return found
+
+    def _rebuilt_stage(self, task_id: str, state: ItemState) -> Stage:
+        """Which of the item's two possible tasks a rebuilt row is following.
+
+        Only the triage step publishes ``needs-info`` and ``declined``, and only a triage task has
+        a directory under the connector's own triage home — created when the task is staged, so the
+        signal is there from the first tick rather than from the moment a report lands. With the
+        step off neither signal is consulted: nothing of the triage path is reachable then, a
+        directory an earlier run left behind included.
+        """
+        if not self.config.research.in_worc:
+            return Stage.IMPLEMENTATION
+        if state in TRIAGE_STATES or triage.is_triage_task(self.home.triage_path, task_id):
+            return Stage.RESEARCH
+        return Stage.IMPLEMENTATION
+
+    def _triage_before(self, item_id: str, seq: int) -> str | None:
+        """The previous attempt's id if it was a triage task: the report this one was built from."""
+        if not self.config.research.in_worc or seq < 2:
+            return None
+        previous = allocate_task_id(self.config.task.id_prefix, item_id, seq - 1)
+        return previous if triage.is_triage_task(self.home.triage_path, previous) else None
 
     def _branch_for(self, task_id: str, item: WorkItem) -> str:
         """The branch that task was published from, re-derived the way it was allocated.

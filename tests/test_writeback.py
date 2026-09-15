@@ -13,8 +13,17 @@ from pathlib import Path
 import pytest
 
 from support import StubAdapter, connector_config, work_item
+from worc_connect.config import ResearchMode
+from worc_connect.core.items import ItemState
 from worc_connect.core.state import ItemRow, Phase
-from worc_connect.core.writeback import PHASE_STATES, STATE_PHASES, Published, WriteBack
+from worc_connect.core.writeback import (
+    PHASE_STATES,
+    STATE_PHASES,
+    TRIAGE_STATES,
+    Published,
+    WriteBack,
+    publishable_states,
+)
 
 NOW = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
 SENTINEL = "canary-a7f3e1-do-not-leak"
@@ -102,14 +111,35 @@ def test_re_applying_the_state_the_item_already_shows_does_nothing(clone: Path) 
     assert adapter.comments == []
 
 
-def test_the_state_labels_are_created_once_before_the_first_one_is_used(clone: Path) -> None:
+def test_the_labels_are_created_once_before_the_first_state_is_used(clone: Path) -> None:
     adapter = StubAdapter(items=[work_item()])
     publisher = write_back(clone, adapter)
 
     publisher.publish(row(Phase.QUEUED), adapter.items[0])
     publisher.publish(row(Phase.RUNNING), adapter.items[0])
 
+    # With triage off, the two states only triage can set get no label: nothing could ever set them.
+    assert adapter.ensured == [
+        (
+            ItemState.QUEUED,
+            ItemState.IN_PROGRESS,
+            ItemState.PR_OPEN,
+            ItemState.DONE,
+            ItemState.FAILED,
+        )
+    ]
+    assert adapter.ensured_triggers == [("worc",)]
+
+
+def test_the_triage_labels_are_created_only_where_the_step_is_on(clone: Path) -> None:
+    adapter = StubAdapter(items=[work_item()])
+
+    write_back(clone, adapter, research=ResearchMode.WORC).ensure_labels()
+
     assert adapter.ensured == [tuple(PHASE_STATES.values())]
+    assert publishable_states(connector_config(clone)) == tuple(
+        state for state in PHASE_STATES.values() if state not in TRIAGE_STATES
+    )
 
 
 def test_queueing_comments_with_the_task_id(clone: Path) -> None:

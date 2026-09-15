@@ -29,6 +29,11 @@ Use **fake executables** — a fake `gh` (JSON fixtures per subcommand, recorded
 - each tracker infrastructure error (auth, rate limit, network): the tick is skipped, no state changes, the process stays up;
 - an item whose task is still in flight drops out of the poll window because another item was updated later: it is read by identifier and its row still advances, the watermark moves on the listed page only, and an item that cannot be read costs its row one tick; a tick with nothing in flight reads nothing by identifier;
 - a trigger label cycled while the task runs disarms the re-trigger, so the task ending produces no second task; withdrawn during the run and re-applied only once the pull request is open, it is a new request;
+- the labels are created once per process, on the first tick, the configured trigger labels included and with nothing gated; the triage labels only with the step on; a dry run creates none; a `gh label create` answered "already exists" is not a failure;
+- a state label with no task behind it is skipped with reason `state-label-without-task` and never becomes a row or a task; a dry run plans from the row it would rebuild without writing it;
+- a task whose file left `pending/` between the tick's listing and the look at the disk is followed, not failed: the listing is read again after the disk (the fake `worc`'s `entries_later` models the race);
+- a stray `.<id>.*.tmp` a crash left in `tasks/preparing/` is swept before the next write, and a failed write leaves none behind;
+- worc's `done` is matched on its leading token wherever it is read, the pull-request discovery included;
 - dry run: stdout names the plan, no file, no state row, no `gh` side-effect verb recorded;
 - the three comment kinds and their contents; close on merge on and off; the rebuild of rows from labels plus `worc list` after the database is deleted;
 - the owner's edits to a published PR (more commits, a new title, a squash merge, a deleted branch) and a PR closed then reopened: every PR-derived state is recomputed by number;
@@ -37,6 +42,7 @@ Use **fake executables** — a fake `gh` (JSON fixtures per subcommand, recorded
 - the pull request worc recorded is preferred over the branch query, and a listing without one still falls back to the branch;
 - a sentinel string planted in an item body is found in the task file and nowhere else: not in any recorded argv, log line, or comment body;
 - the triage path end to end against a fixture report per verdict: the triage task's own dispatch fields, the implementation task an `actionable` report produces (two rows, two ids, and the item never shown the step between them), each other verdict's write-back, the re-trigger when the reporter answers a `needs-info` question — and its absence when nobody did, although the connector's own label and comment moved the item's update stamp, with the connector's clock standing in where the item cannot be read back after the question — and the failures a missing or verdict-less report ends in;
+- a cache deleted while a triage task runs: the row is rebuilt on the triage path from the directory the connector created under `.worc-connect/triage/` when it staged the task, the report is read when the task ends, and the implementation task it produces remembers the triage task it came from; with the step off a directory left behind changes nothing;
 - `install-flow`: the delivered bytes are the shipped bytes, a second run writes nothing, an edited copy is refused until `--force`, and the command refuses before writing anything when the step is off, when the configured flow is not the shipped one, or when the installed worc would reject the flow;
 - **with `research.mode: off`, nothing of the triage path is reachable**: no `.worc/` directory is created, a report left behind by an earlier run is not read, and the row never leaves the implementation path.
 

@@ -54,14 +54,28 @@ def promote(argv: list[str], scenario: dict[str, object]) -> int:
     return 0
 
 
-def listing(scenario: dict[str, object]) -> int:
-    """Answer ``list --format json`` from the scenario's entries."""
+def listing(scenario: dict[str, object], home: Path) -> int:
+    """Answer ``list --format json`` from the scenario's entries.
+
+    ``entries_later``, where a test scripted it, answers every listing after the first: the one way
+    a test can show the listing moving on underneath a tick, which is what worc claiming a queued
+    file between two reads looks like.
+    """
     scripted = scenario.get("list")
     if isinstance(scripted, dict):
         sys.stdout.write(str(scripted.get("stdout", "")))
         return int(scripted.get("exit_code", 0))
-    sys.stdout.write(json.dumps(scenario.get("entries", [])))
+    entries = scenario.get("entries", [])
+    if "entries_later" in scenario and _listings_so_far(home) > 1:
+        entries = scenario["entries_later"]
+    sys.stdout.write(json.dumps(entries))
     return 0
+
+
+def _listings_so_far(home: Path) -> int:
+    """How many ``list`` calls the recording holds, the one being answered included."""
+    recorded = (home / CALLS_FILENAME).read_text(encoding="utf-8").splitlines()
+    return sum(1 for line in recorded if line and json.loads(line)[:1] == ["list"])
 
 
 def version(scenario: dict[str, object]) -> int:
@@ -94,7 +108,7 @@ def main(argv: list[str]) -> int:
     if verb == "promote":
         return promote(argv, scenario)
     if verb == "list":
-        return listing(scenario)
+        return listing(scenario, home)
     if verb == "--version":
         return version(scenario)
     sys.stderr.write(f"fake worc: the connector may not run `worc {verb}`\n")

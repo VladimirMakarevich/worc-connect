@@ -57,7 +57,10 @@ def test_a_watermark_becomes_a_search_qualifier(fake_gh: FakeGh) -> None:
     adapter().list_items(SINCE)
 
     argv = fake_gh.calls_for("issue list")[0]
-    assert argv[argv.index("--search") + 1] == "updated:>=2026-09-10T10:00:00Z sort:updated-asc"
+    # The offset spelling is the one GitHub's search documentation shows for a datetime qualifier.
+    assert (
+        argv[argv.index("--search") + 1] == "updated:>=2026-09-10T10:00:00+00:00 sort:updated-asc"
+    )
 
 
 def test_a_naive_local_watermark_is_sent_as_utc(fake_gh: FakeGh) -> None:
@@ -66,7 +69,7 @@ def test_a_naive_local_watermark_is_sent_as_utc(fake_gh: FakeGh) -> None:
     adapter().list_items(SINCE.astimezone(UTC))
 
     argv = fake_gh.calls_for("issue list")[0]
-    assert argv[argv.index("--search") + 1].startswith("updated:>=2026-09-10T10:00:00Z")
+    assert argv[argv.index("--search") + 1].startswith("updated:>=2026-09-10T10:00:00+00:00")
 
 
 def test_an_issue_payload_becomes_a_normalized_item(fake_gh: FakeGh) -> None:

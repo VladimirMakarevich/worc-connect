@@ -438,3 +438,89 @@ def test_a_dry_run_with_the_step_on_names_the_triage_task_it_would_queue(
     assert list(clone.rglob("tasks")) == []
     assert fake_worc.calls == []
     read_only.close()
+
+
+# --- the cache deleted mid-triage ----------------------------------------------------------------
+
+
+def test_a_row_rebuilt_while_the_triage_task_runs_still_follows_the_triage_path(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    # The state label says `in-progress` and worc's listing names the task; neither says which of
+    # the item's two possible tasks it is. The connector's own triage home does: the directory the
+    # report will land in exists from the tick the task was staged.
+    adapter = StubAdapter(items=[work_item()])
+    loop = watcher(home, adapter, store)
+    loop.tick(dry_run=False)
+    assert (home.triage_path / "gh-142").is_dir()
+    fake_worc.entries(**{"gh-142": "running"})
+    loop.tick(dry_run=False)
+
+    store.close()
+    home.state_path.unlink()
+    rebuilt_store = StateStore(home.state_path)
+    loop = watcher(home, adapter, rebuilt_store)
+    loop.tick(dry_run=False)
+    rebuilt = rebuilt_store.latest_row("github", "142")
+    assert rebuilt is not None
+    assert (rebuilt.stage, rebuilt.phase, rebuilt.task_id) == (
+        Stage.RESEARCH,
+        Phase.RUNNING,
+        "gh-142",
+    )
+
+    write_report(home, "gh-142", report_text(Verdict.ACTIONABLE, reason="do it"))
+    fake_worc.entries(**{"gh-142": "done"})
+    loop.tick(dry_run=False)
+
+    implementation = rebuilt_store.latest_row("github", "142")
+    assert implementation is not None
+    assert (implementation.seq, implementation.stage, implementation.research_task_id) == (
+        2,
+        Stage.IMPLEMENTATION,
+        "gh-142",
+    )
+    assert (home.clone_path / "tasks" / "pending" / "gh-142.2.md").exists()
+    rebuilt_store.close()
+
+
+def test_a_rebuilt_implementation_row_remembers_the_triage_task_it_came_from(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    adapter = StubAdapter(items=[work_item()])
+    loop = triaged(
+        home,
+        store,
+        fake_worc,
+        adapter=adapter,
+        report=report_text(Verdict.ACTIONABLE, reason="do it"),
+    )
+    loop.tick(dry_run=False)
+    fake_worc.entries(**{"gh-142": "done", "gh-142.2": "running"})
+    loop.tick(dry_run=False)
+
+    store.close()
+    home.state_path.unlink()
+    rebuilt_store = StateStore(home.state_path)
+    watcher(home, adapter, rebuilt_store).tick(dry_run=False)
+
+    rebuilt = rebuilt_store.latest_row("github", "142")
+    assert rebuilt is not None
+    assert (rebuilt.task_id, rebuilt.stage, rebuilt.research_task_id) == (
+        "gh-142.2",
+        Stage.IMPLEMENTATION,
+        "gh-142",
+    )
+    rebuilt_store.close()
+
+
+def test_with_the_step_off_a_rebuilt_row_ignores_a_triage_directory_left_behind(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    (home.triage_path / "gh-142").mkdir(parents=True)
+    fake_worc.entries(**{"gh-142": "running"})
+    adapter = StubAdapter(items=[work_item(labels=("worc", "worc:in-progress"))])
+
+    watcher(home, adapter, store, research=ResearchMode.OFF).tick(dry_run=False)
+
+    assert live_row(store).stage is Stage.IMPLEMENTATION

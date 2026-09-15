@@ -16,8 +16,13 @@ from worc_connect.trackers.base import TrackerUnavailable
 
 
 def search_stamp(since: datetime) -> str:
-    """``since`` as GitHub's search syntax wants it: UTC, second precision, no offset notation."""
-    return since.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """``since`` as GitHub's search syntax documents it: UTC, second precision, a ``+00:00`` offset.
+
+    The documented form of a datetime qualifier ends in a UTC offset; a qualifier GitHub did not
+    recognise would silently widen or empty the listing, so the spelling its documentation shows is
+    the one used.
+    """
+    return since.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
 
 def entries(payload: Any) -> list[dict[str, Any]]:

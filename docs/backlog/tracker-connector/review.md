@@ -25,11 +25,11 @@ What the review found is concentrated in one place: **the connector's model of t
 | **F4** | **High** | The title sanitizer can still emit a value worc's gate refuses, breaking FR-C4 / AC-4 | fixed 2026-09-15 |
 | **F5** | Medium | `retrigger_armed` is sticky: a label cycled mid-run silently produces a second task later | fixed 2026-09-15 |
 | **F6** | Medium | The test double does not model `updated_at`, which is why F1 and F3 are invisible | fixed 2026-09-15 |
-| **F7** | Medium | `ensure_labels` runs once per tick, not once per process as the design and the rules state | open |
-| **F8** | Medium | The trigger label is never created, against Q-9 and the record's own assumption | open |
-| **F9** | Medium | A rebuilt row loses `stage` and `research_task_id`, so a deleted cache mid-triage restarts on the wrong path | open |
-| **F10** | Medium | The record's own status, change log and phase table are stale | open |
-| **F11** | Low | Eight smaller divergences, races and unbounded growth points | open |
+| **F7** | Medium | `ensure_labels` runs once per tick, not once per process as the design and the rules state | fixed 2026-09-15 |
+| **F8** | Medium | The trigger label is never created, against Q-9 and the record's own assumption | fixed 2026-09-15 |
+| **F9** | Medium | A rebuilt row loses `stage` and `research_task_id`, so a deleted cache mid-triage restarts on the wrong path | fixed 2026-09-15 |
+| **F10** | Medium | The record's own status, change log and phase table are stale | fixed 2026-09-15 |
+| **F11** | Low | Eight smaller divergences, races and unbounded growth points | fixed 2026-09-15 |
 
 ---
 
@@ -149,6 +149,8 @@ The same gap exists one level down: the fake `gh` never has to reproduce GitHub'
 
 Not expensive, but it is an invariant written down in three places and held in none of them. Either hoist `WriteBack` to the `Watcher` (it is stateless apart from this flag) or correct the docstring and the rule.
 
+**Resolution (2026-09-15).** Hoisted: `WriteBack` is a cached property of the `Watcher`, built once per process, and its `ensure_labels` runs at the start of every real tick and before the first state write, whichever comes first — so the flag holds for the process, as the rule says. Covered in `tests/test_lifecycle.py`.
+
 ## F8 — the trigger label is never created
 
 **Severity: Medium.**
@@ -158,6 +160,8 @@ Not expensive, but it is an invariant written down in three places and held in n
 On a fresh repository the operator must therefore create the `worc` label by hand or nothing is ever gated — and neither [README.md](../../../README.md) nor [docs/configuration.md](../../configuration.md) says so. The "create it on `init`" half of Q-9 was consciously moved (init is offline, per phase 05 step 1 and `architecture.md`), but the trigger label was dropped in the move rather than relocated with the state labels.
 
 Cheapest resolution: create the configured trigger labels alongside the state labels in `ensure_labels`, or state in the operator documentation that the trigger label is theirs to create.
+
+**Resolution (2026-09-15).** Created. `TrackerAdapter.ensure_labels(states, *, triggers)` takes the gate's trigger labels alongside the state labels, and the whole creation runs on the first tick of a process rather than lazily before the first state write — on a fresh repository that write would never come, since nothing can be gated until the trigger label exists. Q-9's "on `init`" is recorded as moved to the first tick, because `init` stays offline. The GitHub adapter gives the trigger label its own description. Covered in `tests/test_lifecycle.py`, `tests/test_github_writes.py`, and through the real CLI in `tests/test_cli.py`.
 
 ## F9 — a rebuilt row loses `stage` and `research_task_id`
 
@@ -169,6 +173,8 @@ With `research.mode: worc` and a deleted cache, a row that was following a **tri
 
 The signal needed to rebuild correctly does exist on disk: the report directory `.worc-connect/triage/<task_id>/` is the connector's own, and a task id found there is a triage task. It is a small amount of work, but it should be work the record acknowledges either way — today neither the design nor `architecture.md` mentions that rebuild is implementation-only.
 
+**Resolution (2026-09-15).** The signal is made to exist from the start: the connector creates `.worc-connect/triage/<task_id>/` when it _stages_ a triage task, so the directory is there while the task is still queued or running, not only once a report has landed (worc's private report policy neither creates nor refuses the directory). `Reconciler.rebuild` reads the stage from it — and from the `needs-info` / `declined` labels, which only triage publishes — and restores `research_task_id` from the previous attempt where that one was a triage task. With `research.mode: off` neither signal is consulted. Covered in `tests/test_research.py`, including a cache deleted while the triage task runs.
+
 ## F10 — the record's own status, change log and phase table are stale
 
 **Severity: Medium (documentation), and this folder is the artefact the owner reads.**
@@ -178,6 +184,8 @@ The signal needed to rebuild correctly does exist on disk: the report directory 
 - [../README.md](../README.md) (the backlog index) carries `ready-to-implement` for this row.
 - [definition-of-done.md](definition-of-done.md) is entirely unticked, including the boxes that are demonstrably met (the gates, the tests, the connector baseline). The boxes that genuinely remain — the real end-to-end runs — are honestly left open in the phase documents, which is the right instinct; the rest should be ticked so that what is left stands out.
 - Smaller drift: [happy-path.md](happy-path.md) Example 1 step 6 quotes the closing comment as "Fixed in `<PR URL>` (worc task `gh-142`)", while the implementation writes "Closed by the merged pull request of worc task `gh-142` (`<url>`)".
+
+**Resolution (2026-09-15).** The status line, the change log (phases 04–07 recorded with their commits, and both rounds of fixes), the phase table, the backlog index row, the happy-path closing comment and the definition of done are brought up to date in this change. The boxes left open in the definition of done are the ones that genuinely remain: the two real runs and the Windows run.
 
 ## F11 — smaller findings
 
@@ -194,6 +202,20 @@ Each of these is real but bounded; none of them alone justifies a phase.
 9. **Dry run does not print the comments AC-8 names.** AC-8 asks the plan to name "items gated, task ids and branch names, labels **and comments**"; the reporter prints item, action, reason, task, branch, label and URL. Either the plan grows the comment body or the criterion should be narrowed.
 10. **`gh` search stamp format.** `search_stamp` emits `…Z`; GitHub's documented example for a datetime qualifier uses `+00:00`. Worth confirming against the real API during the first real run, since a rejected qualifier would silently widen or empty the listing.
 11. **README boundary bullet omits the one write into `.worc/`.** [README.md](../../../README.md) "Boundaries" says "Into worc, one write" and "never reads anything under `.worc/`"; `install-flow` writes into `.worc/flows/` (and creates the directory if worc has not). The exception is stated in the Triage section and in `AGENTS.md`, but not where the invariant is stated.
+
+**Resolution (2026-09-15), item by item.**
+
+1. `_listed` and its docstring agree: an entry with no id — worc's account of a queued file it could not parse, which cannot be one of the connector's — is skipped; an entry with an id but no readable status is refused. Covered in `tests/test_worc_cli.py`.
+2. `pullrequest._is_finished` matches the leading token through `status_token`, against a `DONE_STATUS` shared with the reconcile. Covered in `tests/test_lifecycle.py` with `done (published)`.
+3. A "no task" conclusion is drawn only from a listing read _after_ the look at the disk (`Reconciler._relisted`), on both the staged and the followed path. The fake `worc` gained `entries_later` so the race is a test rather than an argument. Covered in `tests/test_handoff.py`.
+4. `gh label create` answering "already exists" is read as the label being present; the listing cap is an optimisation only. Covered in `tests/test_github_writes.py`.
+5. `connect.log` is a `RotatingFileHandler`: 5 MB per file, three kept. Documented in the configuration reference; asserted in `tests/test_cli.py`.
+6. `handoff.stage` sweeps this item's stray `.<id>.*.tmp` before writing and removes its own temporary in a `finally`, whatever interrupted the write. Covered in `tests/test_handoff.py`.
+7. A state label with no task behind it is neither adopted nor acted on: `rebuild` returns `None`, the tick plans `skip` with reason `state-label-without-task`, and the README says removing the label lets the connector take the item on. The dry run now rebuilds without persisting, so its plan names what the real tick would follow instead of a task it would not create. Covered in `tests/test_lifecycle.py`.
+8. Only the states a configuration can publish get labels: `needs-info` / `declined` only with `research.mode: worc` (`writeback.publishable_states`). Covered in `tests/test_writeback.py`.
+9. AC-8 is narrowed to what a dry run can know — items, task ids, branch names and labels; a comment's text depends on a reconcile the dry run does not perform.
+10. `search_stamp` emits the documented `+00:00` offset. Still worth a glance on the first real run, as the "could not verify" section says.
+11. The README boundary bullet names the one write into `.worc/` where the invariant is stated.
 
 ## What is solid
 

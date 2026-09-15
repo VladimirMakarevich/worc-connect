@@ -118,11 +118,14 @@ class TrackerAdapter(Protocol):
         """Close the item with ``message``, which is a connector-authored template."""
         ...
 
-    def ensure_labels(self, states: tuple[ItemState, ...]) -> None:
-        """Create whichever of the connector's state labels the tracker does not have yet.
+    def ensure_labels(self, states: tuple[ItemState, ...], *, triggers: tuple[str, ...]) -> None:
+        """Create whichever of the connector's labels the tracker does not have yet.
 
-        Called before the first state is written rather than at ``init``, which is an offline
-        command that touches nothing but the connector's own home.
+        ``states`` are the connector-owned states this configuration can publish; ``triggers`` are
+        the gate's trigger labels, spelled as the operator configured them. Called on the first tick
+        of a process rather than at ``init``, which is an offline command that touches nothing but
+        the connector's own home. A label that exists is never edited, and one that turns out to
+        exist after all — a listing the tracker capped — is tolerated rather than reported.
         """
         ...
 

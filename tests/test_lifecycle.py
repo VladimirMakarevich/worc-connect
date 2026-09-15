@@ -26,7 +26,7 @@ from support import (
     work_item,
 )
 from worc_connect.core.items import PullRequestState
-from worc_connect.core.loop import Watcher
+from worc_connect.core.loop import Action, Watcher
 from worc_connect.core.state import ItemRow, Phase, StateStore
 from worc_connect.core.worc_cli import WorcCommand
 from worc_connect.home import ConnectorHome
@@ -458,3 +458,100 @@ def test_a_trigger_re_applied_only_once_the_pull_request_is_open_is_a_new_reques
     loop.tick(dry_run=False)
 
     assert (row_of(store).seq, row_of(store).task_id) == (2, "gh-142.2")
+
+
+def test_the_labels_are_created_once_per_process_not_once_per_tick(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    adapter = StubAdapter(items=[work_item()])
+    loop = watcher(home, adapter, store)
+
+    loop.tick(dry_run=False)
+    fake_worc.entries(**{"gh-142": "running"})
+    loop.tick(dry_run=False)
+    loop.tick(dry_run=False)
+
+    assert len(adapter.states) >= 2  # two state changes were written…
+    assert len(adapter.ensured) == 1  # …and the labels were asked about once
+
+
+def test_the_trigger_label_is_created_on_the_first_tick_even_with_nothing_gated(
+    home: ConnectorHome, store: StateStore
+) -> None:
+    # On a fresh repository nobody can gate an item until the trigger label exists, so its creation
+    # cannot wait for the first state write — that write would never come.
+    adapter = StubAdapter(items=[work_item("143", labels=("question",))])
+
+    watcher(home, adapter, store).tick(dry_run=False)
+
+    assert adapter.ensured_triggers == [("worc",)]
+    assert adapter.states == []
+
+
+def test_a_dry_run_creates_no_labels(home: ConnectorHome) -> None:
+    read_only = StateStore.read_only(home.state_path)
+    adapter = StubAdapter(items=[work_item()])
+
+    watcher(home, adapter, read_only).tick(dry_run=True)
+
+    assert adapter.ensured == []
+    read_only.close()
+
+
+def test_a_decorated_done_status_still_finds_the_pull_request(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    # worc renders display labels, and every reader matches the leading token — the pull-request
+    # discovery included, or a decoration would leave a request never found.
+    adapter = StubAdapter(items=[work_item()], pull_request=pull_request())
+    loop = watcher(home, adapter, store)
+    loop.tick(dry_run=False)
+    fake_worc.entries(**{"gh-142": "done (published)"})
+
+    loop.tick(dry_run=False)
+
+    row = row_of(store)
+    assert (row.phase, row.pr_number) == (Phase.PR_OPEN, 201)
+
+
+def test_a_state_label_with_no_task_behind_it_is_left_alone_and_said_so(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    # Somebody put `worc:done` on an item by hand: worc has never heard of a task for it. The label
+    # says "handled" and worc says "never" — the fail-closed reading is to create nothing, adopt
+    # nothing, and say why. Taking the label off is what lets the connector take the item on.
+    adapter = StubAdapter(items=[work_item(labels=("worc", "worc:done"))])
+    loop = watcher(home, adapter, store)
+
+    report = loop.tick(dry_run=False)
+
+    assert [(planned.action, planned.reason) for planned in report.actions] == [
+        (Action.SKIP, "state-label-without-task")
+    ]
+    assert store.rows() == []
+    assert adapter.states == []
+    assert not (home.clone_path / "tasks").exists()
+
+    adapter.items = [work_item(labels=("worc",))]
+    loop.tick(dry_run=False)
+
+    assert row_of(store).task_id == "gh-142"
+
+
+def test_a_dry_run_plans_from_the_row_it_would_rebuild_without_writing_it(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    # The cache is gone but worc knows the task: the plan says "follow", as the real tick would,
+    # and the read-only store stays empty.
+    fake_worc.entries(**{"gh-142": "running"})
+    adapter = StubAdapter(items=[work_item(labels=("worc", "worc:in-progress"))])
+    store.close()
+    read_only = StateStore.read_only(home.state_path)
+
+    report = watcher(home, adapter, read_only).tick(dry_run=True)
+
+    assert [(planned.action, planned.task_id) for planned in report.actions] == [
+        (Action.FOLLOW, "gh-142")
+    ]
+    assert read_only.rows() == []
+    read_only.close()

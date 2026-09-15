@@ -242,3 +242,55 @@ def test_a_dry_run_stages_nothing_and_launches_no_worc(
     assert fake_worc.calls == []
     assert refuse_git.calls == []
     read_only.close()
+
+
+def test_a_task_worc_claimed_between_the_listing_and_the_disk_check_is_not_failed(
+    home: ConnectorHome, store: StateStore, clone: Path, fake_worc: FakeWorc
+) -> None:
+    # The tick's first listing predates the look at the disk, and the file has left `pending/`
+    # because worc took it in between. One more listing, read after the disk, says so — and the row
+    # follows the task instead of ending as a failure the item is told about.
+    adapter = StubAdapter(items=[work_item()])
+    loop = watcher(home, adapter, store)
+    loop.tick(dry_run=False)
+    (clone / "tasks" / "pending" / "gh-142.md").unlink()
+    fake_worc.entries_later(**{"gh-142": "running"})
+
+    loop.tick(dry_run=False)
+
+    row = store.latest_row("github", "142")
+    assert row is not None and row.phase is Phase.RUNNING
+    assert fake_worc.calls.count(["list", "--format", "json", "--all"]) == 2
+
+
+def test_a_temporary_a_crash_left_in_staging_is_swept_before_the_next_write(
+    home: ConnectorHome, store: StateStore, clone: Path, fake_worc: FakeWorc
+) -> None:
+    preparing = clone / "tasks" / "preparing"
+    preparing.mkdir(parents=True)
+    stray = preparing / ".gh-142.abcd1234.tmp"
+    stray.write_text("half a task\n", encoding="utf-8")
+
+    watcher(home, StubAdapter(items=[work_item()]), store).tick(dry_run=False)
+
+    assert not stray.exists()
+    assert list(preparing.glob(".*.tmp")) == []
+
+
+def test_a_write_that_fails_leaves_no_temporary_behind(
+    clone: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from worc_connect.core import builder, handoff
+
+    config = connector_config(clone)
+    draft = builder.build(work_item(), config, seq=1)
+
+    def refuse(self: Path, target: Path) -> Path:
+        raise PermissionError("the rename was refused")
+
+    monkeypatch.setattr(Path, "replace", refuse)
+
+    with pytest.raises(PermissionError):
+        handoff.stage(draft, config)
+
+    assert list((clone / "tasks" / "preparing").iterdir()) == []

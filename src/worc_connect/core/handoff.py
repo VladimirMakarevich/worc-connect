@@ -76,15 +76,21 @@ def stage(draft: TaskDraft, config: ConnectorConfig) -> Path:
     directory = preparing_dir(config)
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / f"{draft.task_id}.md"
+    # A temporary an earlier attempt at this item left behind — a crash between the write and the
+    # rename — is the connector's own, and it is removed before a new one is written: `preparing/`
+    # is worc's staging area, and nothing else would ever clean it.
+    for stray in directory.glob(f".{draft.task_id}.*.tmp"):
+        stray.unlink(missing_ok=True)
     handle, name = tempfile.mkstemp(dir=directory, prefix=f".{draft.task_id}.", suffix=".tmp")
     temporary = Path(name)
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="") as stream:
             stream.write(draft.content)
         temporary.replace(destination)
-    except OSError:
+    finally:
+        # Whatever interrupted the write, the temporary must not stay where worc stages its tasks;
+        # after a successful rename there is nothing left to remove.
         temporary.unlink(missing_ok=True)
-        raise
     return destination
 
 

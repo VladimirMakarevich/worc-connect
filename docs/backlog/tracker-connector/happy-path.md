@@ -21,7 +21,7 @@ A maintainer who puts the `worc` label on a GitHub issue gets, without typing an
 3. It writes `tasks/preparing/gh-142.md`: front matter with the id, a sanitized title, the branch name and the operator's configured dispatch fields (`priority: mid`, `commit_type: fix` because the issue is labelled `bug`); a body that opens with "Source: GitHub issue #142 by @author — <url>" and then carries the issue text. It runs `worc promote gh-142`, records the item as _queued_, swaps the issue's state label to **`worc:queued`**, and comments: "Queued as worc task `gh-142`."
 4. `worc watch` claims the task on its next tick: validation gate, branch, the `implementation` flow — `refinement` runs because the issue carries no acceptance criteria — checks, review, documentation, commit, push, and a PR whose body is the run's summary.
 5. The connector's next tick sees `gh-142` as `running` in `worc list --format json --all` and moves the label to **`worc:in-progress`**; a later tick finds a PR for head `worc/gh-142-signup-email`, moves the label to **`worc:pr-open`** and comments the PR URL.
-6. A human reviews and merges the PR. The next tick sees `mergedAt` set: the connector closes #142 with "Fixed in <PR URL> (worc task `gh-142`)" and sets **`worc:done`**.
+6. A human reviews and merges the PR. The next tick sees `mergedAt` set: the connector sets **`worc:done`** and closes #142 with "Closed by the merged pull request of worc task `gh-142` (<PR URL>)".
 
 ## Example 2 — an issue nobody gated
 

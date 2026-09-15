@@ -33,6 +33,11 @@ DEFAULT_TIMEOUT_SECONDS: Final = 120.0
 # so the listing is the only place outside worc's private home that names it — and the reason.
 REJECTED_STATUS: Final = "rejected"
 
+# The status worc gives a task from the moment it published. For an implementation task that means
+# "now watch the pull request"; for a triage task, which publishes nothing, it means the report is
+# there to read. Matched on the leading token, like every status: worc decorates its display labels.
+DONE_STATUS: Final = "done"
+
 # How much of a rejection reason may be repeated back. worc's reasons are short enum names, and the
 # string ends up in a comment on a public item, so it is bounded here rather than trusted to stay
 # short forever.
@@ -195,8 +200,11 @@ def _listed(payload: Any) -> dict[str, ListedTask]:
 
     An entry the connector cannot read is refused rather than skipped: the listing is what decides
     whether a task is still running or has failed, and a half-read answer would be worse than none.
-    A key an older worc does not publish is simply absent, which is what lets the same reader serve
-    a worc from before the contract and one from after it.
+    The one entry that is skipped is worc's account of a queued file it could not parse — listed
+    under its filename with no id at all — which cannot be a task the connector wrote, since the
+    connector's ids come from its own builder. A key an older worc does not publish is simply
+    absent, which is what lets the same reader serve a worc from before the contract and one from
+    after it.
     """
     if not isinstance(payload, list):
         raise WorcUnavailable("`worc list --format json` did not return a list of entries")
@@ -207,13 +215,16 @@ def _listed(payload: Any) -> dict[str, ListedTask]:
                 "`worc list --format json` returned an entry that is not an object"
             )
         task_id = entry.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
         status = entry.get("status")
-        if isinstance(task_id, str) and task_id and isinstance(status, str):
-            listed[task_id] = ListedTask(
-                status=status,
-                pr_url=_text(entry.get("pr_url")),
-                validation_reason=_reason(entry.get("validation_reason")),
-            )
+        if not isinstance(status, str):
+            raise WorcUnavailable(f"`worc list --format json` gives task `{task_id}` no status")
+        listed[task_id] = ListedTask(
+            status=status,
+            pr_url=_text(entry.get("pr_url")),
+            validation_reason=_reason(entry.get("validation_reason")),
+        )
     return listed
 
 

@@ -140,7 +140,11 @@ worc-connect/                   # VladimirMakarevich/worc-connect, created 2026-
   tests/                   fake `gh` and fake `worc` executables; unit seams
 ```
 
-`TrackerAdapter` (protocol): `list_items(since) -> list[WorkItem]`, `get_item(id)`, `set_state(id, state)`, `comment(id, body_path)`, `close(id, body_path)`, `find_pull_request(branch) -> PullRequest | None`, `get_pull_request(number) -> PullRequest`, `ensure_labels()`. Adapters raise a small set of infrastructure errors (`TrackerUnavailable`, `TrackerAuth`, `TrackerRateLimited`) the loop turns into "skip this tick, keep state".
+`TrackerAdapter` (protocol): `list_items(since) -> list[WorkItem]`, `get_item(id)`, `set_state(id, state)`, `comment(id, body_path)`, `close(id, body_path)`, `find_pull_request(branch) -> PullRequest | None`, `get_pull_request(number) -> PullRequest`, `ensure_labels(states, triggers)`. Adapters raise a small set of infrastructure errors (`TrackerUnavailable`, `TrackerAuth`, `TrackerRateLimited`) the loop turns into "skip this tick, keep state".
+
+**Labels.** The connector creates its labels on the first tick of a process (Q-9's "on `init`" moved here: `init` is offline): the state labels this configuration can publish — `needs-info` / `declined` only with the triage step on — and the gate's trigger labels, because on a fresh repository nothing can be gated until the trigger label exists. The label listing `gh` offers is capped, so a label it hid is created anyway and the tracker's "already exists" is read as present. A dry run creates none.
+
+**Rebuild.** A row is rebuilt from the item's state label only where worc knows a task for the item (its listing, or a file in the queue); a label with no task behind it — written by hand, or worc's records gone — is skipped with the reason `state-label-without-task`, and the dry run rebuilds without persisting so its plan names what the real tick would follow. Which of the item's two tasks a rebuilt row follows is read from the connector's own triage home: `.worc-connect/triage/<task_id>/` is created when a triage task is staged, so the directory is the signal from the first tick, and `needs-info` / `declined` name a triage task on their own. A "no task" conclusion — the file gone from `pending/` and no entry in `worc list` — is drawn only from a listing read _after_ the look at the disk, so a task worc claimed between the two reads is followed rather than failed.
 
 ## Layers touched (worc, this repository)
 

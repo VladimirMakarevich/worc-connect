@@ -54,7 +54,7 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 
 - **Given** three gated items
 - **When** `watch --once --dry-run` runs
-- **Then** stdout names the three items, their task ids, branch names, labels and comments; no file exists in `tasks/preparing/`, the state database is unchanged, and the fake `gh` recorded no `edit`, `comment`, `close` or `label create` call.
+- **Then** stdout names the three items, their task ids, branch names and labels; no file exists in `tasks/preparing/`, the state database is unchanged, and the fake `gh` recorded no `edit`, `comment`, `close` or `label create` call. (The comments are not named: their text depends on the reconcile a dry run does not perform, and every comment is a connector-authored template either way.)
 
 ### AC-9 — one state label at a time, idempotent (FR-C9)
 

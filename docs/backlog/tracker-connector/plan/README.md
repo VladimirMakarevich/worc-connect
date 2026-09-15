@@ -18,7 +18,7 @@ The critical path is 03 → 04 → 05 → a real end-to-end run. The biggest ris
 | 04 | [Task builder and handoff](04-connector-builder-handoff.md) | connector | FR-C3, C4, C5, C6, C7: a gated issue becomes a promoted worc task, idempotently | 03 | ☑ code complete |
 | 05 | [Write-back and reconciliation](05-connector-writeback.md) | connector | FR-C9, C10, C11, C12: labels, comments, PR link, close on merge, failure path; first real end-to-end run | 04 | ☑ code complete |
 | 06 | [Adopt the worc contract](06-connector-adopt-contract.md) | connector | `Fixes #<n>` via `references:`, `pr_url` and the rejection reason from `worc list --all`, `close_on_merge` becomes a real choice | 01, 02, 05 | ☑ code complete |
-| 07 | [Optional triage](07-connector-triage.md) | connector (+ flow data) | FR-C15: `research.mode`, `install-flow`, the two-step path, the report read from `.worc-connect/triage/<id>/` | 04, 05, 08 | ☐ |
+| 07 | [Optional triage](07-connector-triage.md) | connector (+ flow data) | FR-C15: `research.mode`, `install-flow`, the two-step path, the report read from `.worc-connect/triage/<id>/` | 04, 05, 08 | ☑ code complete |
 | 08 | Configurable report directory, private policy included _(worc repository, tracked there)_ | worc (orchestrator repo) | FR-W4: `flow.report_dir`, `{report_dir}` prompt variable, path validation, the private-policy allowance, `deep_research` prompts switched to the variable | — | ☑ merged into worc `dev` |
 
 Phases 01, 02 and 08 ran in parallel with 03 and are done; the connector's own chain 03 → 04 → 05 → 06 → 07 is code complete, and what remains of it is the two real runs its acceptance criteria name — one with `write_back.close_on_merge: false`, one with `research.mode: worc`.

@@ -21,6 +21,7 @@ from datetime import datetime
 
 from worc_connect.core.items import PullRequest, PullRequestState
 from worc_connect.core.state import ItemRow, Phase
+from worc_connect.core.worc_cli import DONE_STATUS, status_token
 from worc_connect.trackers.base import TrackerAdapter
 
 logger = logging.getLogger(__name__)
@@ -73,8 +74,15 @@ def needs_discovery(row: ItemRow) -> bool:
 
 
 def _is_finished(row: ItemRow) -> bool:
-    """Whether worc's own listing has reported this task finished."""
-    return row.phase is Phase.DONE or row.last_status == "done"
+    """Whether worc's own listing has reported this task finished.
+
+    Matched on the leading token, as every reader of a worc status is: the listing renders a display
+    label, and a decoration on it must not make a finished task look unfinished — that would be a
+    pull request never discovered.
+    """
+    if row.phase is Phase.DONE:
+        return True
+    return row.last_status is not None and status_token(row.last_status) == DONE_STATUS
 
 
 def _from_live(row: ItemRow, request: PullRequest, *, now: datetime) -> ItemRow:

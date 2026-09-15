@@ -1,6 +1,6 @@
 # Tracker connector — work items in, worc tasks out
 
-Status: **ready-to-implement** Date: 2026-09-10 Owner: Vladimir Makarevich Slug: `tracker-connector`
+Status: **code complete — the two real runs outstanding** (was ready-to-implement; phases 03–07 landed 2026-09-11, the review's findings closed 2026-09-15) Date: 2026-09-10 Owner: Vladimir Makarevich Slug: `tracker-connector`
 
 ## Summary
 
@@ -31,6 +31,8 @@ At the user's request every document was drafted in one pass, from the design co
 
 ## Change log
 
+- 2026-09-15 — review findings F7–F11 fixed in the connector ([review.md](review.md) carries a resolution under each): the labels are created once per process on the first tick, the gate's trigger labels included and the triage labels only with the step on, and a label that already exists is tolerated; a row rebuilt after a deleted cache recovers which task it follows from the directory the connector now creates under `.worc-connect/triage/` when it stages a triage task, and a state label with no task behind it is skipped rather than adopted; a "no task" conclusion is drawn only from a listing read after the disk check; `connect.log` rotates; stray staging temporaries are swept; worc's `done` is matched by token everywhere; the `gh` search stamp uses the documented `+00:00` offset; AC-8 is narrowed to what a dry run can know. This record's status, phase table, definition of done and happy path are brought up to date (F10). Only F2 stays open.
+- 2026-09-11 — connector phases 04, 05, 06 and 07 landed in this repository (`35c2b0d` builder and handoff, `3e95843` write-back and the pull-request follow-through, `c0b75a5` the worc contract adopted, `ca9db3b` the optional triage step); phases 03–05 merged as pull request #2, 06 and 07 followed on `main`. The connector's chain 03 → 04 → 05 → 06 → 07 is code complete; what remains of the definition of done is the two real runs.
 - 2026-09-15 — review findings F1, F3, F4, F5 and F6 fixed in the connector ([review.md](review.md) carries a resolution note under each): a row still in flight is followed by identifier when the poll window no longer lists its item, and the watermark moves on the listed page only; a `needs-info` row is re-triggered against the stamp its own question left on the item; the title sanitizer strips the whole leading dash run and is judged against worc's real scanner; a trigger put back while the task still runs disarms the re-trigger; the stub tracker adapter models `updated_at`, `since` and the close. The re-trigger bookkeeping moved into `core/retrigger.py`. F2 and F7–F11 stay open.
 - 2026-09-11 — connector phase 03 landed in this repository (the skeleton: configuration, gate, state, loop, the GitHub adapter's read side and the dry run). The three worc-side phases 01, 02 and 08 merged into the orchestrator's `dev`, so phases 06 and 07 wait on nothing outside this repository.
 - 2026-09-10 — spec folder scaffolded and every document drafted in one pass; branch `chore/spec-tracker-connector` off `dev`.

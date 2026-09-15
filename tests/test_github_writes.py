@@ -91,14 +91,41 @@ def test_closing_carries_a_connector_written_message(fake_gh: FakeGh) -> None:
     assert "gh-142" in call[4]
 
 
-def test_only_the_missing_state_labels_are_created(fake_gh: FakeGh) -> None:
+def test_only_the_missing_labels_are_created_the_trigger_label_included(fake_gh: FakeGh) -> None:
     fake_gh.respond("label list", payload=[{"name": "worc:queued"}, {"name": "bug"}])
     fake_gh.respond("label create", stdout="")
 
-    adapter().ensure_labels((ItemState.QUEUED, ItemState.DONE))
+    adapter().ensure_labels((ItemState.QUEUED, ItemState.DONE), triggers=("worc", "Bug"))
 
     created = [call[2] for call in fake_gh.calls_for("label create")]
-    assert created == ["worc:done"]
+    # `Bug` is present as `bug`: GitHub keeps label names unique case-insensitively.
+    assert created == ["worc:done", "worc"]
+    trigger = next(call for call in fake_gh.calls_for("label create") if call[2] == "worc")
+    assert "worc" in trigger[trigger.index("--description") + 1].casefold()
+
+
+def test_a_label_the_capped_listing_hid_is_not_a_failure(fake_gh: FakeGh) -> None:
+    # The listing is capped, so a label can exist without being listed; `gh label create` then
+    # says so, and that answer is the state the connector wanted rather than an error that would
+    # abort every tick for good.
+    fake_gh.respond("label list", payload=[])
+    fake_gh.respond(
+        "label create",
+        stderr='label with name "worc:done" already exists; use `--force` to update it\n',
+        exit_code=1,
+    )
+
+    adapter().ensure_labels((ItemState.DONE,), triggers=())
+
+    assert len(fake_gh.calls_for("label create")) == 1
+
+
+def test_any_other_label_failure_still_stops_the_tick(fake_gh: FakeGh) -> None:
+    fake_gh.respond("label list", payload=[])
+    fake_gh.respond("label create", stderr="HTTP 500: something broke\n", exit_code=1)
+
+    with pytest.raises(TrackerUnavailable):
+        adapter().ensure_labels((ItemState.DONE,), triggers=())
 
 
 def test_a_pull_request_is_read_by_number(fake_gh: FakeGh) -> None:

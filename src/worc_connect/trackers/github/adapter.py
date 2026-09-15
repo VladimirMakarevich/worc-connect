@@ -52,12 +52,20 @@ _ISSUE_PAGE_LIMIT: Final = 200
 _PULL_REQUEST_PAGE_LIMIT: Final = 10
 
 # Repositories rarely carry more than a few dozen labels, and the listing is read once per process
-# to find which of the connector's own are missing.
+# to find which of the connector's own are missing. The cap is an optimisation, not a limit: a label
+# the capped listing hid is created anyway, and the tracker's "already exists" is read as present.
 _LABEL_PAGE_LIMIT: Final = 200
 
 # What a label the connector created says about itself. Fixed text, because a label description is
-# repository furniture an operator may edit freely afterwards.
+# repository furniture an operator may edit freely afterwards. The trigger label gets its own: it is
+# the one maintainers apply by hand, so it should say what applying it does.
 _LABEL_DESCRIPTION: Final = "Managed by worc-connect"
+_TRIGGER_DESCRIPTION: Final = "Hands this issue to worc (worc-connect trigger label)"
+
+# How `gh label create` reports a name that is already taken. Read as the answer it is rather than
+# as a failure: a label that exists is exactly the state wanted, and treating it as an error would
+# abort every tick for good on a repository whose label listing the cap truncated.
+_ALREADY_EXISTS: Final = "already exists"
 
 # The label suffixes this adapter recognises as a connector state. Built once: a label under the
 # prefix that is not one of them is somebody else's, and reading it as a state would let a hand
@@ -201,22 +209,35 @@ class GitHubAdapter:
         """
         self.command.run("issue", "close", _number(identifier), "--comment", message)
 
-    def ensure_labels(self, states: tuple[ItemState, ...]) -> None:
-        """Create the state labels the repository is missing, and leave the ones it has alone.
+    def ensure_labels(self, states: tuple[ItemState, ...], *, triggers: tuple[str, ...]) -> None:
+        """Create the labels the repository is missing, and leave the ones it has alone.
 
         Existing labels are never edited: their colour and description belong to whoever set them
-        up, and a connector that reset them on every start would be fighting the maintainers.
+        up, and a connector that reset them on every start would be fighting the maintainers. The
+        trigger labels are configuration the operator wrote, which is what allows their names in an
+        argument list at all. Names compare case-insensitively, as GitHub keeps them unique.
         """
         payload = self.command.read_json(
             "label", "list", "--limit", str(_LABEL_PAGE_LIMIT), "--json", "name"
         )
         present = {
-            entry.get("name") for entry in entries(payload) if isinstance(entry.get("name"), str)
+            entry["name"].casefold()
+            for entry in entries(payload)
+            if isinstance(entry.get("name"), str)
         }
-        for state in states:
-            name = self._label_for(state)
-            if name not in present:
-                self.command.run("label", "create", name, "--description", _LABEL_DESCRIPTION)
+        wanted = [(self._label_for(state), _LABEL_DESCRIPTION) for state in states]
+        wanted += [(name, _TRIGGER_DESCRIPTION) for name in triggers]
+        for name, description in wanted:
+            if name.casefold() not in present:
+                self._create_label(name, description)
+
+    def _create_label(self, name: str, description: str) -> None:
+        """Create one label, reading "already exists" as the label being there after all."""
+        try:
+            self.command.run("label", "create", name, "--description", description)
+        except TrackerUnavailable as exc:
+            if _ALREADY_EXISTS not in str(exc).casefold():
+                raise
 
     def closing_reference(self, item: WorkItem) -> str | None:
         """The line that makes GitHub close this issue when the pull request is merged.

@@ -25,6 +25,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from functools import cached_property
 from typing import Final
 
 from worc_connect.config import ConnectorConfig
@@ -60,6 +61,10 @@ WATERMARK_OVERLAP: Final = timedelta(minutes=10)
 # problem is exit 2 and never reaches this module — the CLI refuses before a loop exists.
 _EXIT_OK: Final = 0
 _EXIT_FAILED: Final = 1
+
+# Why an item that shows a connector state but has no task behind it is left alone. Logged and
+# printed verbatim, like a gate reason.
+_LABEL_WITHOUT_TASK: Final = "state-label-without-task"
 
 
 class Action(StrEnum):
@@ -135,6 +140,16 @@ class Watcher:
         """The re-trigger bookkeeping, over this watcher's adapter, store and clock."""
         return Retrigger(adapter=self.adapter, store=self.store, now_fn=self.now_fn)
 
+    @cached_property
+    def _write_back(self) -> WriteBack:
+        """The item-facing half, built once per process: it remembers whether the labels exist.
+
+        Cached on the instance rather than rebuilt per tick, because the one thing it holds is
+        per-process knowledge — a question about the tracker's labels that is worth asking once per
+        run, not once per tick.
+        """
+        return WriteBack(config=self.config, adapter=self.adapter)
+
     def run(self, *, once: bool, dry_run: bool) -> int:
         """Run a single pass or the daemon loop; returns the process exit code."""
         if once:
@@ -152,6 +167,11 @@ class Watcher:
         """
         now = self.now_fn()
         listed = self.adapter.list_items(self._listing_floor())
+        if not dry_run:
+            # Once per process, and before anything is gated: on a fresh repository the trigger
+            # label is what lets a maintainer gate an item at all, so its creation cannot wait for
+            # the first state write. A dry run promises to write nothing, labels included.
+            self._write_back.ensure_labels()
         items = [*listed, *self._followed(listed)]
         reconciler = Reconciler(
             config=self.config,
@@ -160,7 +180,7 @@ class Watcher:
             adapter=self.adapter,
             home=self.home,
         )
-        write_back = WriteBack(config=self.config, adapter=self.adapter)
+        write_back = self._write_back
         actions = tuple(
             self._plan(item, reconciler=reconciler, write_back=write_back, dry_run=dry_run, now=now)
             for item in items
@@ -262,6 +282,13 @@ class Watcher:
         """Decide — and, unless this is a dry run, carry out — what happens to one item."""
         verdict = gate.evaluate(item, self.config.gate)
         row = self._known_row(item, reconciler=reconciler, dry_run=dry_run, now=now)
+        if row is None and self.adapter.current_state(item) is not None:
+            # A state label with no task behind it — written by hand, or worc's own records gone —
+            # is neither adopted nor acted on: the label says "handled" and worc says "never heard
+            # of it", and the fail-closed reading of that is to create nothing and say so. Removing
+            # the label is what lets the connector take the item on.
+            _log(item, None, Action.SKIP, _LABEL_WITHOUT_TASK)
+            return PlannedAction(item.identifier, item.url, Action.SKIP, _LABEL_WITHOUT_TASK)
         if row is not None and not Retrigger.is_new_request(row, item, admitted=verdict.admitted):
             return self._follow(
                 item,
@@ -292,13 +319,17 @@ class Watcher:
 
         The state label on the item is the visible state machine, so an item already carrying one
         is an item the connector has handled — whatever became of its database. Rebuilding rather
-        than starting over is what stops a deleted cache from producing a second task.
+        than starting over is what stops a deleted cache from producing a second task. A dry run
+        rebuilds too, without saving: its plan has to say what the real tick would do, and the
+        read-only store it runs on may hold nothing at all.
         """
         row = self.store.latest_row(self.config.tracker, item.identifier)
-        if row is not None or dry_run:
+        if row is not None:
             return row
         state = self.adapter.current_state(item)
-        return None if state is None else reconciler.rebuild(item, state, now=now)
+        if state is None:
+            return None
+        return reconciler.rebuild(item, state, now=now, persist=not dry_run)
 
     def _take_on(
         self,

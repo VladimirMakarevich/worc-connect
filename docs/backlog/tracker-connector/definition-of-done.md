@@ -18,15 +18,15 @@ Two repositories are involved, so the baseline applies twice: this repository's 
 
 ## Connector baseline (connector phases)
 
-- [ ] The connector repository has the same shape of gates from its first commit: lint + format, type check, import-boundary contract (core never imports an adapter), tests on a Windows + Linux matrix, dependency hygiene.
-- [ ] Every test that touches `gh` or `worc` drives a fake executable; the real binaries are never launched in CI.
-- [ ] The connector's README carries the auto-merge caveat and the "issue text is untrusted" note in plain words.
+- [x] The connector repository has the same shape of gates from its first commit: lint + format, type check, import-boundary contract (core never imports an adapter), tests on a Windows + Linux matrix, dependency hygiene.
+- [x] Every test that touches `gh` or `worc` drives a fake executable; the real binaries are never launched in CI.
+- [x] The connector's README carries the auto-merge caveat and the "issue text is untrusted" note in plain words.
 
 ## Task-specific
 
-- [ ] Every acceptance criterion in [acceptance-criteria.md](acceptance-criteria.md) passes — `AC-W*` here, `AC-C*` in the connector repository.
-- [ ] Everything in [out-of-scope.md](out-of-scope.md) stayed out: no code-host adapter in worc, no tracker knowledge in worc, no connector state in `.worc/` or `state.db`, no new worc config key.
-- [ ] Every blocking question in [questions.md](questions.md) is resolved (there are none at drafting time; the non-blocking ones have a recorded default).
+- [x] Every acceptance criterion in [acceptance-criteria.md](acceptance-criteria.md) passes — `AC-W*` here, `AC-C*` in the connector repository. _(the connector's `AC-C*` by its suite, against the fakes and worc's real gate; `AC-W*` by the worc-side phases merged into the orchestrator's `dev`)_
+- [x] Everything in [out-of-scope.md](out-of-scope.md) stayed out: no code-host adapter in worc, no tracker knowledge in worc, no connector state in `.worc/` or `state.db`, no new worc config key.
+- [x] Every blocking question in [questions.md](questions.md) is resolved (there are none at drafting time; the non-blocking ones have a recorded default).
 - [ ] One real end-to-end run is recorded: a labelled issue on a throwaway GitHub repository, `worc watch` and `worc-connect watch` side by side, from label to merged PR to closed issue, with `research.mode: off`.
 - [ ] `references:` is exercised by that run once phase 06 lands: the PR body ends with `Fixes #<n>` and GitHub closes the issue on merge with `close_on_merge: false`.
 - [ ] A triage run (`research.mode: worc`, phase 07) reads its report from `.worc-connect/triage/<task_id>/report.md` and nothing under `.worc/`; with the connector home deliberately un-ignored the triage task ends `manual_action_required` at publish and the item is labelled `worc:failed`.

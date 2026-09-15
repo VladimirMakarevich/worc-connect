@@ -20,6 +20,7 @@ import logging
 import sys
 from collections.abc import Callable
 from importlib.metadata import entry_points
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from worc_connect import __version__, flows
@@ -45,6 +46,12 @@ _EXIT_FAILED = 1
 _EXIT_USAGE = 2
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
+
+# The action log is one line per action for as long as a daemon runs, which on a busy repository is
+# forever. Rotation bounds it without the operator having to know: a few files of a few megabytes
+# each hold days of ticks, and the oldest is dropped rather than growing without end.
+_LOG_MAX_BYTES = 5 * 1024 * 1024
+_LOG_BACKUPS = 3
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -312,7 +319,14 @@ def _configure_logging(home: ConnectorHome, *, dry_run: bool) -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
     if not dry_run:
         home.path.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(home.log_path, encoding="utf-8"))
+        handlers.append(
+            RotatingFileHandler(
+                home.log_path,
+                maxBytes=_LOG_MAX_BYTES,
+                backupCount=_LOG_BACKUPS,
+                encoding="utf-8",
+            )
+        )
     logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=handlers, force=True)
 
 

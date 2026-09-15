@@ -264,6 +264,17 @@ class FakeWorc:
             entries=[listed_task(task_id, status) for task_id, status in statuses.items()]
         )
 
+    def entries_later(self, **statuses: str) -> None:
+        """Script what every ``worc list`` after the first one answers — a listing that moved on.
+
+        For the one race worth modelling: a task that leaves the queue folder between the tick's
+        first listing and the look at the disk is a task worc claimed in between, and the fake has
+        to be able to say so on the second read.
+        """
+        self.configure(
+            entries_later=[listed_task(task_id, status) for task_id, status in statuses.items()]
+        )
+
     @property
     def calls(self) -> list[list[str]]:
         """Every argument list the connector launched worc with, in order."""
@@ -481,6 +492,7 @@ class StubAdapter:
     comments: list[tuple[str, str]] = field(default_factory=list)
     closed: list[tuple[str, str]] = field(default_factory=list)
     ensured: list[tuple[ItemState, ...]] = field(default_factory=list)
+    ensured_triggers: list[tuple[str, ...]] = field(default_factory=list)
     found_by_branch: list[str] = field(default_factory=list)
     found_by_url: list[str] = field(default_factory=list)
     read_by_number: list[int] = field(default_factory=list)
@@ -553,8 +565,9 @@ class StubAdapter:
         # next tick, while a task still in flight on an item somebody closed by hand is followed.
         self._touch(identifier, closed=True)
 
-    def ensure_labels(self, states: tuple[ItemState, ...]) -> None:
+    def ensure_labels(self, states: tuple[ItemState, ...], *, triggers: tuple[str, ...]) -> None:
         self.ensured.append(states)
+        self.ensured_triggers.append(triggers)
 
     @staticmethod
     def _number_in(url: str) -> int:

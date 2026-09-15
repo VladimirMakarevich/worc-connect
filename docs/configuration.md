@@ -142,7 +142,7 @@ Source: github item #142 by @reporter — https://github.com/OWNER/REPO/issues/1
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `labels_prefix` | `worc:` | Prefix of the connector-owned state labels (`worc:queued`, `worc:in-progress`, `worc:pr-open`, `worc:done`, `worc:failed`, and with triage on `worc:needs-info` / `worc:declined`). Exactly one is present at a time, and re-applying the one the item already shows does nothing. |
+| `labels_prefix` | `worc:` | Prefix of the connector-owned state labels (`worc:queued`, `worc:in-progress`, `worc:pr-open`, `worc:done`, `worc:failed`, and with triage on `worc:needs-info` / `worc:declined`). Exactly one is present at a time, and re-applying the one the item already shows does nothing. The connector creates the ones the repository lacks — and the `gate.labels` trigger labels — on the first tick of a process; the two triage labels only when `research.mode` is `worc`. |
 | `comment` | `true` | Whether to comment when the task is queued, when its pull request exists, and when it ends without one. The closing message on a merge is not a comment and is not switched off by this. |
 | `close_on_merge` | `true` | Whether to close the item when its pull request is merged. With it off the item keeps its `worc:done` label, and **GitHub closes it instead**: the generated task carries `references: ["Fixes #<n>"]`, which worc appends to the pull-request body, so merging into the default branch closes the issue with the code host's own link between the two. Against a worc older than 0.14.0a1 there is no such key, and the item then simply stays open for you to close. |
 
@@ -195,7 +195,7 @@ Everything the connector owns lives in `.worc-connect/` next to worc's own `.wor
 | --- | --- |
 | `config.yaml` | This file. |
 | `state.db` | The SQLite cache of one row per item plus the poll watermark. **Disposable**: every tick re-derives the truth from the tracker, `worc list` and the lifecycle folders, so deleting it costs one tick. |
-| `connect.log` | One line per action: `item=… task=… action=… result=…`. Ids and URLs are the only item-derived values it carries. |
+| `connect.log` | One line per action: `item=… task=… action=… result=…`. Ids and URLs are the only item-derived values it carries. Rotated by size — 5 MB per file, three older files kept — so a daemon on a busy repository never grows it without end. |
 | `connect.pid` | Written while a `watch` daemon runs, removed when it exits cleanly. A second `watch` in the same clone refuses to start while it exists; after a crash, delete it. |
 | `connect.stop` | The stop sentinel. Create the file and the loop exits before its next tick and removes it. A file rather than a signal, so Windows behaves like POSIX. |
 | `triage/<task-id>/report.md` | Where the triage flow leaves its report, in a directory the connector owns rather than under `.worc/`. Read by the connector, written by worc, and gitignored — worc refuses to publish a private report that git can see. |

@@ -95,6 +95,23 @@ def report_path(home_path: Path, task_id: str) -> Path:
     return home_path / task_id / REPORT_FILENAME
 
 
+def mark_triage_task(home_path: Path, task_id: str) -> None:
+    """Create the per-task directory under the connector's triage home before the task is staged.
+
+    The directory is the report's declared destination, so the flow writes into it either way.
+    Creating it first makes its existence the one signal — surviving a deleted cache — that a task
+    id is a triage task's, from the tick the task is staged rather than from the moment a report
+    lands; a row rebuilt while the task still runs would otherwise be followed as an implementation
+    task and its report never read.
+    """
+    report_path(home_path, task_id).parent.mkdir(parents=True, exist_ok=True)
+
+
+def is_triage_task(home_path: Path, task_id: str) -> bool:
+    """Whether ``task_id`` is a triage task: it owns a directory under the triage home."""
+    return report_path(home_path, task_id).parent.is_dir()
+
+
 def read(home_path: Path, task_id: str) -> Report | None:
     """The report for ``task_id``, or ``None`` when there is none this parser can act on.
 

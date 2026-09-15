@@ -55,6 +55,10 @@ PHASE_STATES: Final = {
 # The reverse, for rebuilding a row from what the item already shows.
 STATE_PHASES: Final = {state: phase for phase, state in PHASE_STATES.items()}
 
+# The two states only the triage step can put an item in. Their labels are created only where the
+# step is on: a label nothing can ever set is repository furniture the operator did not ask for.
+TRIAGE_STATES: Final = frozenset({ItemState.NEEDS_INFO, ItemState.DECLINED})
+
 _COMMENT_FILENAME: Final = "comment.md"
 
 
@@ -72,17 +76,42 @@ class Published(StrEnum):
     CLOSED = "closed"
 
 
+def publishable_states(config: ConnectorConfig) -> tuple[ItemState, ...]:
+    """The states this configuration can show an item in — the labels worth creating, no others."""
+    return tuple(
+        state
+        for state in PHASE_STATES.values()
+        if config.research.in_worc or state not in TRIAGE_STATES
+    )
+
+
 @dataclass
 class WriteBack:
-    """The item-facing half of a tick: state labels, comments and the close on merge.
+    """The item-facing half of a connector process: state labels, comments and the close on merge.
 
-    Holds one piece of per-process state — whether the tracker's state labels have been created —
-    because that is a question worth asking once per run rather than once per item.
+    Built once per process rather than once per tick, because it holds one piece of per-process
+    state — whether the tracker's labels have been created yet — and that is a question worth
+    asking once per run rather than once per tick or once per item.
     """
 
     config: ConnectorConfig
     adapter: TrackerAdapter
     _labels_ensured: bool = False
+
+    def ensure_labels(self) -> None:
+        """Create the connector's labels once per process, before anything else touches an item.
+
+        Two kinds: the state labels this configuration can publish, and the gate's trigger labels.
+        On a fresh repository nobody can gate an item until the trigger label exists, so creating it
+        cannot wait for the first state write — that write would never come. A tracker that refuses
+        raises, the tick fails closed, and the flag stays unset so the next tick asks again.
+        """
+        if self._labels_ensured:
+            return
+        self.adapter.ensure_labels(
+            publishable_states(self.config), triggers=self.config.gate.labels
+        )
+        self._labels_ensured = True
 
     def publish(self, row: ItemRow, item: WorkItem) -> Published:
         """Show ``row``'s phase on the item; returns what doing so took.
@@ -98,7 +127,7 @@ class WriteBack:
         current = self.adapter.current_state(item)
         if current is desired:
             return Published.NOTHING
-        self._ensure_labels()
+        self.ensure_labels()
         self.adapter.set_state(item.identifier, desired, previous=current)
         _log(row, "state", str(desired))
         return self._announce(row, item, desired)
@@ -125,13 +154,6 @@ class WriteBack:
             self.adapter.comment(item.identifier, path)
         _log(row, "comment", str(state))
         return Published.SHOWN
-
-    def _ensure_labels(self) -> None:
-        """Create the connector's state labels once per process, before the first state is shown."""
-        if self._labels_ensured:
-            return
-        self.adapter.ensure_labels(tuple(PHASE_STATES.values()))
-        self._labels_ensured = True
 
 
 def _comment_body(row: ItemRow, state: ItemState) -> str | None:

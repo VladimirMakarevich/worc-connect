@@ -1,6 +1,6 @@
 # Configuration reference
 
-The connector reads one file, `.worc-connect/config.yaml`, written by `worc-connect init` and edited by the operator. This page is the reference for every key in it; the quickstart is in [README.md](../README.md).
+The connector reads one file, `.worc-connect/config.yaml`, written by `worc-connect init` and edited by the operator. This page is the reference for every key in it; the quickstart is in the repository README.
 
 The loader **rejects rather than repairs**. A key this build does not declare, a value of the wrong type, or a gate that admits nothing stops the process with exit code 2 and a message naming the key. That strictness is deliberate: a mistyped `authors:` would otherwise silently widen the gate from "these people" to "anyone who can apply the label", and the gate is the only thing between a stranger's issue text and an agent with write access to the repository.
 

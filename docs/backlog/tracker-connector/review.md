@@ -20,7 +20,7 @@ What the review found is concentrated in one place: **the connector's model of t
 | # | Severity | Finding | Status |
 | --- | --- | --- | --- |
 | **F1** | **High** | An item whose task is still running is abandoned once the poll watermark moves past it | fixed 2026-09-15 |
-| **F2** | **High** | The documented minimum worc version (`0.14.0a1`) is ahead of the worc that ships the contract (`0.10.3a2`), so phases 06 and 07 never activate | open |
+| **F2** | **High** | The documented minimum worc version (`0.14.0a1`) is ahead of the worc that ships the contract (`0.10.3a2`), so phases 06 and 07 never activate | fixed 2026-09-15 |
 | **F3** | **High** | A `needs-info` verdict re-triggers itself: the connector's own comment is read as the reporter's answer | fixed 2026-09-15 |
 | **F4** | **High** | The title sanitizer can still emit a value worc's gate refuses, breaking FR-C4 / AC-4 | fixed 2026-09-15 |
 | **F5** | Medium | `retrigger_armed` is sticky: a label cycled mid-run silently produces a second task later | fixed 2026-09-15 |

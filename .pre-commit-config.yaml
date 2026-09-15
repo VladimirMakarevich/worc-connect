@@ -57,9 +57,9 @@ repos:
         pass_filenames: false
         files: (\.py$|^pyproject\.toml$)
       # The Markdown corpus: links, anchors, reachability, size budgets. No explicit filenames: the
-      # gate's own config defines the corpus, and the graph rules need all of it. The linter lives in a
-      # separate, unpublished repository and runs on node; when it is not available locally the
-      # runner prints how to enable it and passes.
+      # gate's own config defines the corpus, and the graph rules need all of it. The linter is the
+      # pinned `@wastech-mdlint/cli` devDependency and runs on node; before `npm ci` has been run
+      # locally the runner prints how to install it and passes — CI installs it and fails hard.
       - id: mdlint
         name: markdown context (wastech-mdlint)
         entry: python tools/mdlint.py

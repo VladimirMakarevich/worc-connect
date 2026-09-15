@@ -6,8 +6,9 @@ name: ci
 # per OS would add cost without adding signal. The suite never launches the real `gh` or `worc`: every
 # integration test drives a fake executable, so CI is deterministic and credential-free. worc itself
 # is installed in the test job all the same — imported, never launched, so that the generated task
-# file is judged by its real validation gate. The Markdown gate is a local pre-commit hook until its
-# linter is published.
+# file is judged by its real validation gate. The Markdown gate runs here too, in its own job: its
+# linter is a published npm package, so the gate is no longer only as strong as a contributor's
+# pre-commit hook.
 on:
   pull_request:
   push:
@@ -63,6 +64,36 @@ jobs:
 
       - name: Dependency hygiene (deptry)
         run: deptry src
+
+  markdown:
+    name: markdown gate (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The linter requires >= 24.17.0 (all three @wastech-mdlint packages declare it).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # tools/mdlint.py is a stdlib-only script, so the project itself is never installed here — this
+      # step only guarantees that `python` resolves, which is not true of a bare Ubuntu runner.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # `npm ci` installs exactly the lockfile, so the gate cannot change meaning between this run and
+      # a contributor's without the lockfile change being visible in the diff.
+      - name: Install the linter (npm ci)
+        run: npm ci
+
+      # The same entry point the pre-commit hook runs, so the two can never drift apart. Under CI the
+      # script exits 2 rather than skipping when the linter is missing: a gate that reports success
+      # for a pass it never ran is worse than a red one.
+      - name: Markdown gate (wastech-mdlint)
+        run: python tools/mdlint.py
 
   test:
     name: tests (${{ matrix.os }} / py${{ matrix.python-version }})

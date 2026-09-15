@@ -28,8 +28,8 @@ secrets/
 .worc/
 .worc-io/
 
-# Node dependencies. This project ships no JavaScript; the directory only appears if the Markdown
-# linter is ever installed here as a package instead of resolved from a checkout of its own.
+# Node dependencies. This project ships no JavaScript: the tree holds only the Markdown linter,
+# installed from package.json and pinned by package-lock.json, which IS tracked.
 node_modules/
 
 # IDE / OS

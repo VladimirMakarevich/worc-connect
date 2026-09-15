@@ -124,8 +124,12 @@ python -m venv .venv && . .venv/bin/activate    # PowerShell: .venv\Scripts\Acti
 pip install -e ".[dev]"
 pip install -r requirements-worc.txt            # worc itself, for the one suite that needs it
 pre-commit install && pre-commit install --hook-type pre-push
+npm ci                                          # the Markdown linter (needs Node >= 24.17)
 ruff check . && ruff format --check . && mypy src && lint-imports && python tools/size_gate.py && pytest
+python tools/mdlint.py                          # Markdown gate
 ```
+
+`npm ci` installs one dev tool and nothing that ships: the Markdown gate ([wastech-mdlint](https://www.npmjs.com/package/@wastech-mdlint/cli)), pinned in [package.json](package.json) and locked by `package-lock.json`. It is the only reason this repository has a `package.json`; the Python package is built from `pyproject.toml` and owes it nothing. Skip it and `python tools/mdlint.py` prints how to install it and passes, while CI runs it either way.
 
 Windows, macOS and Linux are all release targets; the test suite runs natively on all three in CI and never launches the real `gh` or `worc` — every integration test drives a fake executable, so the suite needs no network and no credential.
 

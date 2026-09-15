@@ -31,6 +31,7 @@ At the user's request every document was drafted in one pass, from the design co
 
 ## Change log
 
+- 2026-09-15 — review findings F1, F3, F4, F5 and F6 fixed in the connector ([review.md](review.md) carries a resolution note under each): a row still in flight is followed by identifier when the poll window no longer lists its item, and the watermark moves on the listed page only; a `needs-info` row is re-triggered against the stamp its own question left on the item; the title sanitizer strips the whole leading dash run and is judged against worc's real scanner; a trigger put back while the task still runs disarms the re-trigger; the stub tracker adapter models `updated_at`, `since` and the close. The re-trigger bookkeeping moved into `core/retrigger.py`. F2 and F7–F11 stay open.
 - 2026-09-11 — connector phase 03 landed in this repository (the skeleton: configuration, gate, state, loop, the GitHub adapter's read side and the dry run). The three worc-side phases 01, 02 and 08 merged into the orchestrator's `dev`, so phases 06 and 07 wait on nothing outside this repository.
 - 2026-09-10 — spec folder scaffolded and every document drafted in one pass; branch `chore/spec-tracker-connector` off `dev`.
 - 2026-09-10 — user fixed the name (`worc-connect`) and the home (`.worc-connect/`) and accepted the defaults for Q-3…Q-10; D14 added for the owner editing, retitling, reopening and merging a published PR by hand (FR-C16/FR-C17, AC-16/AC-17/AC-E9, happy-path Example 4, phase 05 steps); Q-11 opened for the follow-up-on-open-PR default.

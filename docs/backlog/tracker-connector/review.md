@@ -17,19 +17,19 @@ The build is unusually disciplined. The boundaries the record cares most about h
 
 What the review found is concentrated in one place: **the connector's model of the tracker is thinner than the tracker itself.** The test double never changes an item's `updated_at`, so two behaviours that only exist on a real tracker — the poll window moving on, and the connector's own writes bumping the item — are invisible to 401 green tests. Both produce visible, repeatable failures on a real repository. Added to that, the worc version the connector demands does not exist, which makes phases 06 and 07 unreachable in practice.
 
-| # | Severity | Finding |
-| --- | --- | --- |
-| **F1** | **High** | An item whose task is still running is abandoned once the poll watermark moves past it |
-| **F2** | **High** | The documented minimum worc version (`0.14.0a1`) is ahead of the worc that ships the contract (`0.10.3a2`), so phases 06 and 07 never activate |
-| **F3** | **High** | A `needs-info` verdict re-triggers itself: the connector's own comment is read as the reporter's answer |
-| **F4** | **High** | The title sanitizer can still emit a value worc's gate refuses, breaking FR-C4 / AC-4 |
-| **F5** | Medium | `retrigger_armed` is sticky: a label cycled mid-run silently produces a second task later |
-| **F6** | Medium | The test double does not model `updated_at`, which is why F1 and F3 are invisible |
-| **F7** | Medium | `ensure_labels` runs once per tick, not once per process as the design and the rules state |
-| **F8** | Medium | The trigger label is never created, against Q-9 and the record's own assumption |
-| **F9** | Medium | A rebuilt row loses `stage` and `research_task_id`, so a deleted cache mid-triage restarts on the wrong path |
-| **F10** | Medium | The record's own status, change log and phase table are stale |
-| **F11** | Low | Eight smaller divergences, races and unbounded growth points |
+| # | Severity | Finding | Status |
+| --- | --- | --- | --- |
+| **F1** | **High** | An item whose task is still running is abandoned once the poll watermark moves past it | fixed 2026-09-15 |
+| **F2** | **High** | The documented minimum worc version (`0.14.0a1`) is ahead of the worc that ships the contract (`0.10.3a2`), so phases 06 and 07 never activate | open |
+| **F3** | **High** | A `needs-info` verdict re-triggers itself: the connector's own comment is read as the reporter's answer | fixed 2026-09-15 |
+| **F4** | **High** | The title sanitizer can still emit a value worc's gate refuses, breaking FR-C4 / AC-4 | fixed 2026-09-15 |
+| **F5** | Medium | `retrigger_armed` is sticky: a label cycled mid-run silently produces a second task later | fixed 2026-09-15 |
+| **F6** | Medium | The test double does not model `updated_at`, which is why F1 and F3 are invisible | fixed 2026-09-15 |
+| **F7** | Medium | `ensure_labels` runs once per tick, not once per process as the design and the rules state | open |
+| **F8** | Medium | The trigger label is never created, against Q-9 and the record's own assumption | open |
+| **F9** | Medium | A rebuilt row loses `stage` and `research_task_id`, so a deleted cache mid-triage restarts on the wrong path | open |
+| **F10** | Medium | The record's own status, change log and phase table are stale | open |
+| **F11** | Low | Eight smaller divergences, races and unbounded growth points | open |
 
 ---
 
@@ -48,6 +48,8 @@ A worc task takes minutes to hours. Between `worc:in-progress` and the pull requ
 **Why it was not caught by design either.** The design says "on every tick it also reconciles the items it already handed off", and `TrackerAdapter.get_item` exists with the docstring "Used where the listing cannot answer — an item that has dropped out of the open listing but still carries a live task" (`src/worc_connect/trackers/base.py:67`). **Nothing in the core calls it.** The seam was designed and then not wired up.
 
 **Suggested shape of the fix.** After the listing, union it with the items of every non-terminal row the store holds, fetched by `get_item`; a fetch that fails is one row skipped, not a failed tick. That also makes the loop correct for an item closed by hand (it leaves the open listing but its task is still worc's), and it is the only change that lets the watermark stay a cheap poll filter rather than becoming the authority on what to follow.
+
+**Resolution (2026-09-15).** Built as suggested. `Watcher.tick` lists, then reads by identifier every item whose current row is not terminal and that the listing left out (`StateStore.live_rows` — the highest sequence per item, so an earlier attempt a follow-up left at `pr-open` is not followed); a read that fails is logged as `action=fetch result=skipped-<class>` and costs that row one tick. The watermark moves on the listed page only, and the tick report and the `watch` summary count `listed` and `followed` separately. Covered in `tests/test_loop.py` against the double from **F6**, including the exact eviction scenario reproduced above.
 
 ## F2 — the minimum worc version does not exist, so phases 06 and 07 never activate
 
@@ -86,6 +88,8 @@ So on the tick after a `needs-info` verdict is published, the item's `updated_at
 
 **Suggested shape of the fix.** Record the moment the question was published, not the moment the attempt started: when a row concludes at `needs-info`, store the item's `updated_at` **after** the write-back (or the wall clock at which the comment was posted) and compare against that. Note the phase-07 decision that armed this path — "a `needs-info` re-trigger is armed by the item's update stamp" — is right; it is the stamp that is the wrong one.
 
+**Resolution (2026-09-15).** `WriteBack.publish` now answers `Published.NOTHING | SHOWN | CLOSED` instead of a bool; when a row concludes at `needs-info` and something was actually written, the item is read back and the `updated_at` the question left on it becomes the row's stamp. Where that read fails, the connector's clock at that moment stands in — a reply inside the clock skew is missed, which costs nothing, where a stale stamp costs a triage run per tick. The re-trigger bookkeeping (arming, disarming, the stamp) moved out of `loop.py` into `core/retrigger.py`, which is what kept the loop inside its 500-line budget. Covered in `tests/test_research.py`: the existing "nobody answered" test now exercises the bug thanks to **F6**, and a second test pins the fallback.
+
 ## F4 — the title sanitizer can still emit a value worc's gate refuses
 
 **Severity: High. Reproduced against worc's own scanner.**
@@ -107,6 +111,8 @@ Any title whose leading run of dashes is broken by whitespace produces a task wo
 
 **Suggested shape of the fix.** Strip the leading run with a pattern rather than a single pass — `re.sub(r"^[-\s]+", "", collapsed)` — or loop until the value is stable, and add the cases above to `test_builder.py` and to `test_worc_gate.py` so the real gate judges them.
 
+**Resolution (2026-09-15).** `sanitize_title` strips the leading run with `^[-\s]+`, and the comment on the pattern names the coupling with worc's third arm: every flag shape `find_forbidden_args` refuses begins with a dash, so a title whose first character is anything else can match none of them. `tests/test_worc_gate.py` judges the four titles above, the flag shapes, and every substring in worc's own `INJECTION_SUBSTRINGS` against worc's real `scan_value` and the real gate, so a token added on worc's side fails here rather than quarantining a task.
+
 ## F5 — `retrigger_armed` is sticky, so a label cycled mid-run produces a second task later
 
 **Severity: Medium. Reproduced.**
@@ -121,6 +127,8 @@ So: a maintainer removes the label while the task is running and puts it back a 
 
 **Suggested shape of the fix.** Disarm when the label comes back while the row is not yet re-triggerable: in `_follow`, an admitted verdict on an armed, non-terminal row clears the flag. One line, and it makes "armed" mean "the trigger is currently withdrawn" rather than "was withdrawn once".
 
+**Resolution (2026-09-15).** Built as suggested, as `Retrigger.restored` in `core/retrigger.py`: an admitted sighting of an armed row that is not yet re-triggerable disarms it (logged as `action=retrigger result=disarmed`). The boundary is pinned too — withdrawn during the run and still withdrawn when the pull request opens, the label coming back is a new request. Covered in `tests/test_lifecycle.py`.
+
 ## F6 — the test double does not model `updated_at`
 
 **Severity: Medium.**
@@ -130,6 +138,8 @@ So: a maintainer removes the label while the task is running and puts it back a 
 Those two omissions are what hide **F1** and **F3** — both of them behaviours of the field the whole polling model rests on. The fix is small and pays for itself immediately: bump `updated_at` on every write, honour `since` in `list_items`, and let the existing tests tell you which assumptions they were quietly making.
 
 The same gap exists one level down: the fake `gh` never has to reproduce GitHub's `updated:>=` semantics, because the adapter's search string is asserted as a string rather than exercised as a filter.
+
+**Resolution (2026-09-15).** `StubAdapter` now honours `since` (open items updated at or after it, oldest first), moves the item's `updated_at` one second past the latest stamp it has handed out on every `set_state`, `comment` and `close`, and keeps a closed item readable by `get_item` while dropping it from the listing. The existing "nobody answered" test exposed **F3** the moment it did, and the eviction of **F1** became reproducible against the loop. The fake `gh` half of the gap stays open: `issue list` still answers from a static fixture, and the search string is asserted rather than exercised.
 
 ## F7 — `ensure_labels` runs once per tick, not once per process
 

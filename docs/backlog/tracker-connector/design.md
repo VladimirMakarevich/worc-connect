@@ -56,7 +56,7 @@ The shape mirrors worc's own architecture on purpose: a core that knows no exter
 
 ### D8 — The title is sanitized because worc rejects, it does not sanitize
 
-**Decision.** The task `title` is derived from the item title by: collapsing whitespace, dropping control characters, dropping newlines, and dropping any `;`, backtick, `|`, `$(` sequence, and any leading `-`; truncated to 120 characters; falling back to `Issue #<n>` when nothing survives. The body is carried verbatim (worc's injection scan reads front-matter values only, by design: "legitimate tasks embed shell snippets").
+**Decision.** The task `title` is derived from the item title by: collapsing whitespace, dropping control characters, dropping newlines, and dropping any `;`, backtick, `|`, `$(` sequence, and the whole leading run of dashes, whitespace inside the run included (`- -foo` with only its first dash removed is `-foo`, the same refusal one step later; every flag shape worc's forbidden-argument check names begins with a dash too, so the same strip covers that arm); truncated to 120 characters; falling back to `Issue #<n>` when nothing survives. The body is carried verbatim (worc's injection scan reads front-matter values only, by design: "legitimate tasks embed shell snippets").
 
 **Why.** worc's scanner is "reject, don't sanitize" — a title that trips it quarantines the task in `.worc/tasks/rejected/`. The connector has to produce a clean title, and it must never let the rejection be silent (see Failure classes).
 
@@ -130,7 +130,8 @@ worc-connect/                   # VladimirMakarevich/worc-connect, created 2026-
       handoff.py           write to tasks/preparing/, run `worc promote`
       reconcile.py         worc list --format json + PR by branch → phase
       writeback.py         state label transitions, comments, close
-      loop.py              tick, watermark, stop sentinel, PID file
+      retrigger.py         when a sighting of a handled item is a new request: arming, the needs-info stamp
+      loop.py              tick, watermark, the rows followed outside the window, stop sentinel, PID file
     trackers/
       base.py              TrackerAdapter protocol
       github/              gh-based adapter (extra: github)
@@ -169,7 +170,9 @@ No change to `providers/`, `routing/`, `config/`, `security/` or `state.db`; the
 
 **Watermark.** `max(item.updated_at)` over the listed page, persisted after the tick completes; items are listed with `since = watermark - overlap` (overlap 10 minutes) so a clock skew never drops an item, and the per-item `item_updated_at` in the row makes the overlap idempotent.
 
-**Re-trigger.** A row in `pr-open` or in a terminal phase whose item is reopened, or whose trigger label is re-applied after removal, gets `seq + 1` and a fresh cycle from `gated`. If the previous task's PR is still open, the new task is built with `branch_mode: existing` / `branch_ref: <that branch>` so it continues the same PR (D14); otherwise it gets a fresh branch.
+**Items the window no longer lists.** The listing is a filter on updates, not the authority on what to follow: between the queue and the pull request nothing updates an item, and one comment on any other issue would move the window past it for good. So every item whose current row is not terminal and that the listing did not return is read by identifier (`get_item`) in the same tick — an item closed by hand included, since its task is still worc's. An item that cannot be read costs its row one tick, not the whole tick; the watermark moves on the listed page only, and the tick report counts `listed` and `followed` separately.
+
+**Re-trigger.** A row in `pr-open` or in a terminal phase whose item is reopened, or whose trigger label is re-applied after removal, gets `seq + 1` and a fresh cycle from `gated`. The row is _armed_ while its trigger is withdrawn — the label taken off, or the item closed by the connector's own merge — and a trigger put back while the task is still in flight disarms it: a label cycled mid-run is a correction, not a request for a second task once this one ends. A `needs-info` row needs no arming: it is re-triggered when the item changes _after the question was posted_, measured against the item's update stamp read back once the connector's own label and comment were written (the connector's clock stands in where that read fails). If the previous task's PR is still open, the new task is built with `branch_mode: existing` / `branch_ref: <that branch>` so it continues the same PR (D14); otherwise it gets a fresh branch.
 
 **Process control.** `watch` writes `.worc-connect/connect.pid` and stops on `.worc-connect/connect.stop` (sentinel, checked between ticks) — no signals, so Windows behaves like POSIX; `--once` writes neither.
 

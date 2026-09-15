@@ -179,3 +179,22 @@ def test_the_database_is_created_with_its_parent_directory(tmp_path: Path) -> No
     StateStore(path).close()
 
     assert path.is_file()
+
+
+def test_the_live_rows_are_each_items_current_attempt_while_it_is_in_flight(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path / "state.db")
+    store.save(row("142", phase=Phase.PR_OPEN))  # superseded by the follow-up below
+    store.save(row("142", seq=2, phase=Phase.RUNNING))
+    store.save(row("143", phase=Phase.DONE))
+    store.save(row("144", phase=Phase.QUEUED))
+    store.save(row("145", phase=Phase.NEEDS_INFO))
+    store.save(row("146", phase=Phase.PR_OPEN))  # a follow-up left this one behind, finished
+    store.save(row("146", seq=2, phase=Phase.DONE))
+
+    live = store.live_rows("github")
+
+    assert [(item.item_id, item.seq) for item in live] == [("142", 2), ("144", 1)]
+    assert store.live_rows("other") == []
+    store.close()

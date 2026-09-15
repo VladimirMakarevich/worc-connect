@@ -414,3 +414,47 @@ def test_a_follow_up_after_a_merge_gets_a_fresh_branch(
     staged = (home.clone_path / "tasks" / "pending" / "gh-142.2.md").read_text(encoding="utf-8")
     assert "branch_name: worc/gh-142.2-" in staged
     assert "branch_ref" not in staged
+
+
+def test_a_trigger_cycled_while_the_task_runs_produces_no_second_task_when_it_ends(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    adapter = StubAdapter(items=[work_item()], pull_request=pull_request())
+    loop = watcher(home, adapter, store)
+    loop.tick(dry_run=False)
+    fake_worc.entries(**{"gh-142": "running"})
+    adapter.items = [work_item(labels=("worc:in-progress",))]  # the label comes off mid-run
+    loop.tick(dry_run=False)
+    assert row_of(store).retrigger_armed is True
+    adapter.items = [work_item(labels=("worc", "worc:in-progress"))]  # and goes back a minute on
+    loop.tick(dry_run=False)
+    assert row_of(store).retrigger_armed is False
+
+    fake_worc.entries(**{"gh-142": "done"})
+    loop.tick(dry_run=False)
+
+    row = row_of(store)
+    assert (row.seq, row.task_id, row.phase) == (1, "gh-142", Phase.PR_OPEN)
+    assert not (home.clone_path / "tasks" / "pending" / "gh-142.2.md").exists()
+
+
+def test_a_trigger_re_applied_only_once_the_pull_request_is_open_is_a_new_request(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    # The boundary of the rule above: withdrawn during the run and still withdrawn when the task
+    # hands over to a pull request, the label coming back asks for more — the same request as
+    # cycling it while the pull request is open.
+    adapter = StubAdapter(items=[work_item()], pull_request=pull_request())
+    loop = watcher(home, adapter, store)
+    loop.tick(dry_run=False)
+    fake_worc.entries(**{"gh-142": "running"})
+    adapter.items = [work_item(labels=("worc:in-progress",))]
+    loop.tick(dry_run=False)
+    fake_worc.entries(**{"gh-142": "done"})
+    loop.tick(dry_run=False)
+    assert (row_of(store).phase, row_of(store).retrigger_armed) == (Phase.PR_OPEN, True)
+
+    adapter.items = [work_item(labels=("worc", "worc:pr-open"))]
+    loop.tick(dry_run=False)
+
+    assert (row_of(store).seq, row_of(store).task_id) == (2, "gh-142.2")

@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import tempfile
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
@@ -57,6 +58,20 @@ STATE_PHASES: Final = {state: phase for phase, state in PHASE_STATES.items()}
 _COMMENT_FILENAME: Final = "comment.md"
 
 
+class Published(StrEnum):
+    """What :meth:`WriteBack.publish` did to the item, for the caller that has to act on it.
+
+    A yes or no would not do. A close is what turns a later trigger on the same item into a new
+    request, and a state actually written is what moves the item's own update stamp — which a row
+    that has just asked the reporter a question must be measured from, or the question reads as
+    the answer.
+    """
+
+    NOTHING = "nothing"
+    SHOWN = "shown"
+    CLOSED = "closed"
+
+
 @dataclass
 class WriteBack:
     """The item-facing half of a tick: state labels, comments and the close on merge.
@@ -69,25 +84,26 @@ class WriteBack:
     adapter: TrackerAdapter
     _labels_ensured: bool = False
 
-    def publish(self, row: ItemRow, item: WorkItem) -> bool:
-        """Show ``row``'s phase on the item; returns whether that closed the item.
+    def publish(self, row: ItemRow, item: WorkItem) -> Published:
+        """Show ``row``'s phase on the item; returns what doing so took.
 
-        The caller needs the answer because closing is what turns a later trigger on the same item
-        into a new request: a closed item leaves the tracker's open listing, so only somebody
-        reopening it — or re-applying the label — brings it back.
+        ``NOTHING`` when the item already shows the state — a quiet tick, a rebuilt row — and
+        ``CLOSED`` when showing it closed the item, which the caller needs because a closed item
+        leaves the tracker's open listing, so only somebody reopening it — or re-applying the label
+        — brings it back as a new request.
         """
         desired = PHASE_STATES.get(row.phase)
         if desired is None:
-            return False
+            return Published.NOTHING
         current = self.adapter.current_state(item)
         if current is desired:
-            return False
+            return Published.NOTHING
         self._ensure_labels()
         self.adapter.set_state(item.identifier, desired, previous=current)
         _log(row, "state", str(desired))
         return self._announce(row, item, desired)
 
-    def _announce(self, row: ItemRow, item: WorkItem, state: ItemState) -> bool:
+    def _announce(self, row: ItemRow, item: WorkItem, state: ItemState) -> Published:
         """Say what changed, in the one place people who use the tracker will look.
 
         Closing is part of this rather than of the state write because a close is the connector's
@@ -97,10 +113,10 @@ class WriteBack:
         if state is ItemState.DONE and row.pr_merged and self.config.write_back.close_on_merge:
             self.adapter.close(item.identifier, _closing_message(row))
             _log(row, "close", "merged")
-            return True
+            return Published.CLOSED
         body = _comment_body(row, state)
         if body is None or not self.config.write_back.comment:
-            return False
+            return Published.SHOWN
         with tempfile.TemporaryDirectory(prefix="worc-connect-") as directory:
             # Outside the clone on purpose: the only path the connector writes there is the task
             # file, and a transient body has no business next to worc's lifecycle tree.
@@ -108,7 +124,7 @@ class WriteBack:
             path.write_text(body, encoding="utf-8", newline="")
             self.adapter.comment(item.identifier, path)
         _log(row, "comment", str(state))
-        return False
+        return Published.SHOWN
 
     def _ensure_labels(self) -> None:
         """Create the connector's state labels once per process, before the first state is shown."""

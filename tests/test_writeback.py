@@ -14,7 +14,7 @@ import pytest
 
 from support import StubAdapter, connector_config, work_item
 from worc_connect.core.state import ItemRow, Phase
-from worc_connect.core.writeback import PHASE_STATES, STATE_PHASES, WriteBack
+from worc_connect.core.writeback import PHASE_STATES, STATE_PHASES, Published, WriteBack
 
 NOW = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
 SENTINEL = "canary-a7f3e1-do-not-leak"
@@ -240,3 +240,16 @@ def test_no_comment_body_can_carry_a_word_the_item_wrote(clone: Path) -> None:
     assert adapter.comments
     for _, body in adapter.comments:
         assert SENTINEL not in body
+
+
+def test_publish_says_what_it_did_to_the_item(clone: Path) -> None:
+    # The loop acts on the answer: a close arms the re-trigger, and a state actually written is
+    # what moved the item's update stamp — which a row that just asked a question is measured from.
+    adapter = StubAdapter(items=[work_item(labels=("worc", "worc:pr-open"))])
+    publisher = write_back(clone, adapter)
+    merged = row(Phase.DONE, pr_url="https://example.test/pull/201", pr_merged=True)
+
+    assert publisher.publish(row(Phase.STAGED), adapter.items[0]) is Published.NOTHING
+    assert publisher.publish(row(Phase.PR_OPEN), adapter.items[0]) is Published.NOTHING
+    assert publisher.publish(row(Phase.FAILED), adapter.items[0]) is Published.SHOWN
+    assert publisher.publish(merged, adapter.items[0]) is Published.CLOSED

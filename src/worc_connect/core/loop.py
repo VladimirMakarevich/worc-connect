@@ -9,6 +9,10 @@ Two operational properties matter as much as the logic:
 
 * **A failing tracker costs one tick.** All three adapter failures — unreachable, throttled, not
   logged in — are caught here, logged by class, and change no state. The next tick is the retry.
+* **The listing is a filter, not the authority on what to follow.** It answers "what changed", and
+  an item whose task is running is exactly an item nothing is changing — so every row still in
+  flight is read by identifier when the poll window has moved past its item, and the watermark
+  stays a cheap filter on updates rather than the thing that decides which tasks are watched.
 * **Stopping is a file, not a signal** — a sentinel the loop polls and a PID file it holds, both of
   them in the connector's home. The mechanism lives next door; what the loop owns is when to ask.
 """
@@ -18,7 +22,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Final
@@ -28,10 +32,10 @@ from worc_connect.core import builder, gate
 from worc_connect.core.control import ProcessControl
 from worc_connect.core.items import WorkItem
 from worc_connect.core.reconcile import Reconciler
+from worc_connect.core.retrigger import Retrigger
 from worc_connect.core.state import (
     META_LAST_TICK_AT,
     META_LAST_TICK_RESULT,
-    TERMINAL_PHASES,
     ItemRow,
     Phase,
     Stage,
@@ -40,7 +44,7 @@ from worc_connect.core.state import (
     write_watermark,
 )
 from worc_connect.core.worc_cli import WorcCommand, WorcUnavailable
-from worc_connect.core.writeback import PHASE_STATES, WriteBack
+from worc_connect.core.writeback import PHASE_STATES, Published, WriteBack
 from worc_connect.home import ConnectorHome
 from worc_connect.trackers.base import TrackerAdapter, TrackerError
 
@@ -56,11 +60,6 @@ WATERMARK_OVERLAP: Final = timedelta(minutes=10)
 # problem is exit 2 and never reaches this module — the CLI refuses before a loop exists.
 _EXIT_OK: Final = 0
 _EXIT_FAILED: Final = 1
-
-# The phases a re-trigger may start a new attempt from: worc is finished with the task, or has
-# handed it to a pull request the connector is only watching. Anything earlier is still in flight,
-# and a second task for an item already being worked on is exactly what the id rule forbids.
-_RETRIGGERABLE_PHASES: Final = TERMINAL_PHASES | {Phase.PR_OPEN}
 
 
 class Action(StrEnum):
@@ -90,11 +89,18 @@ class PlannedAction:
 
 @dataclass(frozen=True)
 class TickReport:
-    """What one tick saw and did — the value ``status`` summarizes and a dry run prints."""
+    """What one tick saw and did — the value ``status`` summarizes and a dry run prints.
+
+    ``listed`` counts the items the tracker's listing returned; ``followed`` the ones read by
+    identifier because a task of theirs is still in flight while the poll window no longer lists
+    them. Both are handled the same way once read — the split is for the operator, who is owed the
+    difference between "nothing changed" and "nothing changed, and two tasks are still watched".
+    """
 
     listed: int
     actions: tuple[PlannedAction, ...]
     watermark: datetime | None
+    followed: int = 0
 
     def counted(self, action: Action) -> int:
         """How many items this tick decided ``action`` for."""
@@ -124,6 +130,11 @@ class Watcher:
     now_fn: Callable[[], datetime] = _utc_now
     sleep_fn: Callable[[float], None] = time.sleep
 
+    @property
+    def _retrigger(self) -> Retrigger:
+        """The re-trigger bookkeeping, over this watcher's adapter, store and clock."""
+        return Retrigger(adapter=self.adapter, store=self.store, now_fn=self.now_fn)
+
     def run(self, *, once: bool, dry_run: bool) -> int:
         """Run a single pass or the daemon loop; returns the process exit code."""
         if once:
@@ -140,7 +151,8 @@ class Watcher:
         is the retry.
         """
         now = self.now_fn()
-        items = self.adapter.list_items(self._listing_floor())
+        listed = self.adapter.list_items(self._listing_floor())
+        items = [*listed, *self._followed(listed)]
         reconciler = Reconciler(
             config=self.config,
             store=self.store,
@@ -153,8 +165,16 @@ class Watcher:
             self._plan(item, reconciler=reconciler, write_back=write_back, dry_run=dry_run, now=now)
             for item in items
         )
-        watermark = self._advance_watermark(items, dry_run=dry_run)
-        report = TickReport(listed=len(items), actions=actions, watermark=watermark)
+        # The watermark moves on what the listing saw and nothing else: an item read by identifier
+        # was outside the window, and letting its stamp move the window would make the rows the
+        # connector follows decide what the tracker is asked for next.
+        watermark = self._advance_watermark(listed, dry_run=dry_run)
+        report = TickReport(
+            listed=len(listed),
+            actions=actions,
+            watermark=watermark,
+            followed=len(items) - len(listed),
+        )
         if not dry_run:
             self._note_tick(now, f"ok listed={report.listed} staged={report.counted(Action.STAGE)}")
         return report
@@ -203,6 +223,33 @@ class Watcher:
         watermark = read_watermark(self.store)
         return None if watermark is None else watermark - WATERMARK_OVERLAP
 
+    def _followed(self, listed: Sequence[WorkItem]) -> list[WorkItem]:
+        """The items with a task still in flight that the listing left out, read one by one.
+
+        Between the queue and the pull request the connector's own writes are the last thing that
+        touched an item, and one comment on any other item moves the poll window past it for good;
+        a row that is never listed again would never be advanced. So every item with a live row is
+        read by identifier when the listing did not return it — an item closed by hand included,
+        since its task is still worc's. An item that cannot be read costs its row one tick, not the
+        whole tick: the row stays where it was, and the next tick asks again.
+        """
+        seen = {item.identifier for item in listed}
+        followed: list[WorkItem] = []
+        for row in self.store.live_rows(self.config.tracker):
+            if row.item_id in seen:
+                continue
+            try:
+                followed.append(self.adapter.get_item(row.item_id))
+            except TrackerError as exc:
+                logger.warning(
+                    "item=%s task=%s action=fetch result=skipped-%s (%s)",
+                    row.item_id,
+                    row.task_id or "-",
+                    type(exc).__name__,
+                    exc,
+                )
+        return followed
+
     def _plan(
         self,
         item: WorkItem,
@@ -215,7 +262,7 @@ class Watcher:
         """Decide — and, unless this is a dry run, carry out — what happens to one item."""
         verdict = gate.evaluate(item, self.config.gate)
         row = self._known_row(item, reconciler=reconciler, dry_run=dry_run, now=now)
-        if row is not None and not self._is_retrigger(row, item, admitted=verdict.admitted):
+        if row is not None and not Retrigger.is_new_request(row, item, admitted=verdict.admitted):
             return self._follow(
                 item,
                 row,
@@ -252,27 +299,6 @@ class Watcher:
             return row
         state = self.adapter.current_state(item)
         return None if state is None else reconciler.rebuild(item, state, now=now)
-
-    @staticmethod
-    def _is_retrigger(row: ItemRow, item: WorkItem, *, admitted: bool) -> bool:
-        """Whether this sighting starts a **new** attempt at an item the connector already handled.
-
-        Only a row that is finished — or waiting on a pull request, which worc is done with — can
-        be re-triggered, and only once the connector has seen the thing that makes a later trigger
-        a fresh request rather than the same one still standing: the label taken off, or the item
-        closed by the connector itself. An id is never reused, so the new attempt gets the next
-        sequence number.
-
-        A row the triage step left at ``needs-info`` is the one case that needs no arming: the
-        connector asked the reporter a question, so the reporter answering it — the item changing
-        after the row was written — *is* the new request, and waiting for a label to be cycled would
-        make the round trip a step the operator has to perform by hand.
-        """
-        if not admitted:
-            return False
-        if row.phase is Phase.NEEDS_INFO:
-            return _answered(row, item)
-        return row.retrigger_armed and row.phase in _RETRIGGERABLE_PHASES
 
     def _take_on(
         self,
@@ -328,11 +354,16 @@ class Watcher:
 
         A trigger label taken off afterwards does not withdraw the task — it is worc's now, and
         cancelling a run from a label would make a queue an operator cannot reason about. What the
-        withdrawal does do is arm the next re-application of the label as a new request.
+        withdrawal does do is arm the next re-application of the label as a new request — provided
+        the row has reached a phase a new request can start from by then. A label put back while
+        the task still runs undoes the withdrawal instead: it is a correction, and it must not turn
+        into a second task the moment this one ends.
         """
         if not admitted:
             _log(item, row.task_id, Action.FOLLOW, "gate-withdrawn")
-            row = self._arm_retrigger(row, dry_run=dry_run, now=now)
+            row = self._retrigger.withdrawn(row, dry_run=dry_run, now=now)
+        else:
+            row = self._retrigger.restored(row, dry_run=dry_run, now=now)
         if dry_run:
             return self._planned(item, row, Action.FOLLOW, str(row.phase))
         return self._carry_out(
@@ -356,10 +387,11 @@ class Watcher:
         """
         reconciler, write_back = work
         moved = reconciler.advance(row, item, now=now)
-        if write_back.publish(moved, item):
-            # Armed only once the item is actually closed: a close that never happened must not
-            # leave a row that the next tick reads as a fresh request.
-            moved = self._arm_retrigger(moved, dry_run=False, now=now)
+        published = write_back.publish(moved, item)
+        if published is Published.CLOSED:
+            moved = self._retrigger.closed(moved, now=now)
+        elif published is Published.SHOWN and moved.phase is Phase.NEEDS_INFO:
+            moved = self._retrigger.question_posted(moved, item, now=now)
         _log(item, moved.task_id, action, reason if action is Action.STAGE else str(moved.phase))
         return self._planned(
             item, moved, action, reason if action is Action.STAGE else str(moved.phase)
@@ -378,18 +410,6 @@ class Watcher:
             row.branch,
             None if state is None else str(state),
         )
-
-    def _arm_retrigger(self, row: ItemRow, *, dry_run: bool, now: datetime) -> ItemRow:
-        """Record that a later trigger on this item would be a new request rather than this one.
-
-        Two things arm it, and both are events the connector observed rather than inferred: the
-        trigger withdrawn, and the item closed because its pull request merged.
-        """
-        if row.retrigger_armed or dry_run:
-            return row
-        armed = replace(row, retrigger_armed=True, updated_at=now)
-        self.store.save(armed)
-        return armed
 
     def _new_row(self, item: WorkItem, *, seq: int, branch: str | None, now: datetime) -> ItemRow:
         """The row an attempt at an admitted item starts from.
@@ -435,15 +455,6 @@ class Watcher:
         logger.warning("item=- task=- action=list result=skipped-%s (%s)", type(exc).__name__, exc)
         if not dry_run:
             self._note_tick(self.now_fn(), f"skipped {type(exc).__name__}")
-
-
-def _answered(row: ItemRow, item: WorkItem) -> bool:
-    """Whether the item has changed since the row that asked its reporter a question was written.
-
-    A row with no stamp to compare against is not treated as answered: the connector would then
-    re-trigger on every tick, which is the one direction a fail-closed gate must not lean.
-    """
-    return row.item_updated_at is not None and item.updated_at > row.item_updated_at
 
 
 def _log(item: WorkItem, task_id: str | None, action: Action, result: str) -> None:

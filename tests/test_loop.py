@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from support import FakeWorc, StubAdapter, connector_config, work_item
+from worc_connect.core.items import WorkItemState
 from worc_connect.core.loop import WATERMARK_OVERLAP, Action, TickReport, Watcher
 from worc_connect.core.state import Phase, StateStore, read_watermark
 from worc_connect.core.worc_cli import WorcCommand
@@ -371,3 +372,81 @@ def test_the_home_layout_is_a_sibling_of_worcs_own(home: ConnectorHome, clone: P
     assert home.path == clone / ".worc-connect"
     assert home.clone_path == clone
     assert home.triage_path.parent == home.path
+
+
+# --- the poll window, and the rows it no longer lists -------------------------------------------
+
+
+def test_the_stub_models_the_window_the_close_and_the_stamp_a_write_leaves() -> None:
+    # The double has to model the half of the tracker the loop's whole model rests on: `since` is
+    # a filter on the update stamp, a closed item leaves the listing but stays readable, and every
+    # write the connector makes moves the stamp. Otherwise a test passes against a tracker that
+    # cannot exhibit the failure it is meant to catch.
+    older = work_item("141", updated_at=UPDATED - timedelta(hours=1))
+    newer = work_item("143", updated_at=UPDATED + timedelta(hours=1))
+    adapter = StubAdapter(items=[newer, work_item("142", updated_at=UPDATED), older])
+
+    assert [item.identifier for item in adapter.list_items(UPDATED)] == ["142", "143"]
+    assert [item.identifier for item in adapter.list_items(None)] == ["141", "142", "143"]
+
+    adapter.close("142", "closed")
+
+    assert [item.identifier for item in adapter.list_items(None)] == ["141", "143"]
+    assert adapter.get_item("142").state is WorkItemState.CLOSED
+    assert adapter.get_item("142").updated_at > UPDATED
+
+
+def test_an_item_the_poll_window_no_longer_lists_is_still_followed(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    adapter = StubAdapter(items=[work_item(updated_at=UPDATED)])
+    loop = watcher(home, adapter, store)
+    loop.tick(dry_run=False)
+    # One unrelated item, updated an hour later, moves the window past the gated one for good:
+    # between the queue and its pull request nothing touches an item.
+    adapter.items.append(
+        work_item("143", labels=("question",), updated_at=UPDATED + timedelta(hours=1))
+    )
+    loop.tick(dry_run=False)
+    fake_worc.entries(**{"gh-142": "running"})
+
+    report = loop.tick(dry_run=False)
+
+    assert (report.listed, report.followed) == (1, 1)
+    assert adapter.fetched == ["142"]
+    row = store.latest_row("github", "142")
+    assert row is not None
+    assert row.phase is Phase.RUNNING
+    assert adapter.states[-1] == ("142", "in-progress", "queued")
+    # The window moves on what the listing saw; an item read by identifier does not drag it about.
+    assert read_watermark(store) == UPDATED + timedelta(hours=1)
+
+
+def test_a_tick_with_nothing_in_flight_reads_no_item_by_identifier(
+    home: ConnectorHome, store: StateStore
+) -> None:
+    adapter = StubAdapter(items=[work_item("143", labels=("question",), updated_at=UPDATED)])
+    loop = watcher(home, adapter, store)
+
+    loop.tick(dry_run=False)
+    report = loop.tick(dry_run=False)
+
+    assert (report.followed, adapter.fetched) == (0, [])
+
+
+def test_a_followed_item_that_cannot_be_read_costs_its_row_one_tick(
+    home: ConnectorHome, store: StateStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    adapter = StubAdapter(items=[work_item(updated_at=UPDATED)])
+    loop = watcher(home, adapter, store)
+    loop.tick(dry_run=False)
+    adapter.items = []  # gone from the tracker altogether
+
+    with caplog.at_level(logging.WARNING, logger="worc_connect.core.loop"):
+        report = loop.tick(dry_run=False)
+
+    assert (report.listed, report.followed) == (0, 0)
+    row = store.latest_row("github", "142")
+    assert row is not None
+    assert row.phase is Phase.QUEUED
+    assert "item=142 task=gh-142 action=fetch result=skipped-TrackerUnavailable" in caplog.text

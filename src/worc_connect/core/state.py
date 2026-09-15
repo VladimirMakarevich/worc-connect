@@ -115,6 +115,9 @@ class ItemRow:
     updated_at: datetime
     task_id: str | None = None
     branch: str | None = None
+    # The item's update stamp as the connector last recorded it: the one the attempt started from,
+    # or — for a row that ended by asking the reporter a question — the one the question itself
+    # left on the item, so that only a later change reads as the answer.
     item_updated_at: datetime | None = None
     last_status: str | None = None
     # The reason worc's validation gate refused the task, as worc published it. Held so the item
@@ -241,6 +244,29 @@ class StateStore:
         )
         record = cursor.fetchone()
         return None if record is None else _row(record)
+
+    def live_rows(self, tracker: str) -> list[ItemRow]:
+        """Each item's current row whose attempt is still in flight, oldest sighting first.
+
+        The rows a tick has to advance whether or not the tracker lists their items: a task between
+        the queue and its pull request is exactly an item nothing is updating, so the poll window
+        moves past it while its row still has somewhere to go. Only the highest sequence counts —
+        an earlier attempt a follow-up left at ``pr-open`` is history, not a task to follow.
+        """
+        cursor = self._connection.execute(
+            """
+            SELECT * FROM items AS live
+            WHERE tracker = ?
+              AND seq = (
+                SELECT MAX(seq) FROM items
+                WHERE tracker = live.tracker AND item_id = live.item_id
+              )
+            ORDER BY created_at, item_id
+            """,
+            (tracker,),
+        )
+        current = (_row(record) for record in cursor.fetchall())
+        return [row for row in current if row.phase not in TERMINAL_PHASES]
 
     def save(self, row: ItemRow) -> None:
         """Insert ``row``, or update the one with the same tracker, item and sequence.

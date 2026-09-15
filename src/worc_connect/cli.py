@@ -327,7 +327,8 @@ def _reporter(config: ConnectorConfig, *, dry_run: bool) -> Callable[[TickReport
     def report(tick: TickReport) -> None:
         summary = (
             f"repo={config.repo} tracker={config.tracker} listed={tick.listed} "
-            f"gated={tick.counted(Action.STAGE)} following={tick.counted(Action.FOLLOW)}"
+            f"followed={tick.followed} gated={tick.counted(Action.STAGE)} "
+            f"following={tick.counted(Action.FOLLOW)}"
         )
         if not dry_run:
             print(f"tick: {summary}")

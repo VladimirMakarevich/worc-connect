@@ -28,6 +28,14 @@ TITLE_MAX_LEN: Final = 120
 
 _WHITESPACE: Final = re.compile(r"\s+")
 
+# The whole leading run of dashes, the whitespace inside it included. worc strips a value and
+# refuses one that then starts with `-`; its forbidden-flag check reads that same stripped value as
+# one argv token, and every shape it names — `--yolo`, `--dangerously…`, `--sandbox`, `-s`,
+# `--permission-mode` — begins with a dash too, so a title whose first character is anything else
+# can match none of them. Whitespace belongs in the run because `- -foo` with only its first dash
+# removed is `-foo`: the same refusal, one step later.
+_LEADING_DASHES: Final = re.compile(r"^[-\s]+")
+
 # What a reader sees where the item's own text was cut. The wording is the connector's own, and it
 # carries the URL so the full text is one click away.
 TRUNCATION_NOTICE: Final = "…truncated by worc-connect — the full text is on the item: "
@@ -44,9 +52,7 @@ def sanitize_title(raw: str, *, fallback: str) -> str:
     for token in _INJECTION_TOKENS:
         text = text.replace(token, " ")
     collapsed = _WHITESPACE.sub(" ", text).strip()
-    # Every leading dash, not just the first: the scan reads the whole run, so removing one would
-    # leave `--flag` as `-flag`, which it refuses for exactly the same reason.
-    trimmed = collapsed.lstrip("-").strip()
+    trimmed = _LEADING_DASHES.sub("", collapsed)
     if len(trimmed) > TITLE_MAX_LEN:
         trimmed = trimmed[:TITLE_MAX_LEN].strip()
     return trimmed or fallback

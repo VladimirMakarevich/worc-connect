@@ -13,7 +13,7 @@ import os
 import stat
 import sys
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, metadata
 from pathlib import Path
 from typing import Any
@@ -458,17 +458,25 @@ class StubAdapter:
     protocol the real adapter implements, so anything the loop learned about GitHub specifically
     would show up here as a missing method rather than as a passing test.
 
-    The write side records instead of sending, and reads the current state back off the item's own
-    labels exactly as a real adapter does — so "re-applying a state is a no-op" is asserted against
-    the same mechanism the product uses, not against a convenient shortcut.
+    The write side records instead of sending, and it does to its own copy of the item what a
+    tracker does to the real one: the new label replaces the old, a label edit and a comment move
+    the item's update stamp, a close takes it out of the open listing. So "re-applying a state is a
+    no-op", "the connector's own question is not the reporter's answer" and "an item the poll
+    window no longer lists is still followed" are all asserted against the mechanism the product
+    runs on, not against a convenient shortcut. The stamp advances one second past the latest one
+    the stub has handed out, which keeps the order of events unambiguous without a wall clock.
     """
 
     items: list[WorkItem] = field(default_factory=list)
     failures: list[Exception] = field(default_factory=list)
+    # Raised, one per call, by the next reads of a single item — a tracker that lists fine and then
+    # throttles the read right after a write is the case the loop has to survive.
+    fetch_failures: list[Exception] = field(default_factory=list)
     pull_request: PullRequest | None = None
     pull_requests: dict[int, PullRequest] = field(default_factory=dict)
     labels_prefix: str = "worc:"
     listed_since: list[datetime | None] = field(default_factory=list)
+    fetched: list[str] = field(default_factory=list)
     states: list[tuple[str, str, str | None]] = field(default_factory=list)
     comments: list[tuple[str, str]] = field(default_factory=list)
     closed: list[tuple[str, str]] = field(default_factory=list)
@@ -479,14 +487,25 @@ class StubAdapter:
     # The tracker's own closing keyword; `None` stands for an adapter whose tracker has none, which
     # is a case the builder has to handle without a per-tracker branch.
     closing_keyword: str | None = "Fixes"
+    _last_stamp: datetime | None = None
 
     def list_items(self, since: datetime | None) -> list[WorkItem]:
         self.listed_since.append(since)
         if self.failures:
             raise self.failures.pop(0)
-        return list(self.items)
+        # The open items updated at or after `since`, oldest update first — the listing's contract,
+        # and the half of it the watermark rests on.
+        listed = [
+            item
+            for item in self.items
+            if item.state is WorkItemState.OPEN and (since is None or item.updated_at >= since)
+        ]
+        return sorted(listed, key=lambda item: item.updated_at)
 
     def get_item(self, identifier: str) -> WorkItem:
+        self.fetched.append(identifier)
+        if self.fetch_failures:
+            raise self.fetch_failures.pop(0)
         for item in self.items:
             if item.identifier == identifier:
                 return item
@@ -521,16 +540,18 @@ class StubAdapter:
 
     def set_state(self, identifier: str, state: ItemState, *, previous: ItemState | None) -> None:
         self.states.append((identifier, str(state), None if previous is None else str(previous)))
-        self._relabel(identifier, state)
+        self._touch(identifier, state=state)
 
     def comment(self, identifier: str, body_path: Path) -> None:
         self.comments.append((identifier, body_path.read_text(encoding="utf-8")))
+        self._touch(identifier)
 
     def close(self, identifier: str, message: str) -> None:
         self.closed.append((identifier, message))
-        # A closed item leaves the open listing, exactly as it does on a real tracker — which is
-        # what keeps a merged, closed item from being re-triggered on the very next tick.
-        self.items = [item for item in self.items if item.identifier != identifier]
+        # A closed item leaves the open listing but stays readable by identifier, exactly as on a
+        # real tracker: that is what keeps a merged, closed item from being re-triggered on the very
+        # next tick, while a task still in flight on an item somebody closed by hand is followed.
+        self._touch(identifier, closed=True)
 
     def ensure_labels(self, states: tuple[ItemState, ...]) -> None:
         self.ensured.append(states)
@@ -539,11 +560,32 @@ class StubAdapter:
     def _number_in(url: str) -> int:
         return int(url.rstrip("/").rsplit("/", 1)[-1])
 
-    def _relabel(self, identifier: str, state: ItemState) -> None:
-        """Put the new state on the stub's own copy of the item, as the tracker would."""
+    def _touch(
+        self, identifier: str, *, state: ItemState | None = None, closed: bool = False
+    ) -> None:
+        """Apply one write to the stub's own copy of the item, as the tracker would.
+
+        Every write moves the update stamp; a state write also swaps the label, and a close also
+        takes the item out of the open listing.
+        """
         for index, item in enumerate(self.items):
-            if item.identifier == identifier:
-                kept = tuple(
-                    label for label in item.labels if not label.startswith(self.labels_prefix)
-                )
-                self.items[index] = replace(item, labels=(*kept, f"{self.labels_prefix}{state}"))
+            if item.identifier != identifier:
+                continue
+            labels = item.labels
+            if state is not None:
+                kept = (label for label in item.labels if not label.startswith(self.labels_prefix))
+                labels = (*kept, f"{self.labels_prefix}{state}")
+            self.items[index] = replace(
+                item,
+                labels=labels,
+                state=WorkItemState.CLOSED if closed else item.state,
+                updated_at=self._stamp(item),
+            )
+
+    def _stamp(self, item: WorkItem) -> datetime:
+        """The update stamp one more write leaves on ``item``: later than anything seen so far."""
+        latest = (
+            item.updated_at if self._last_stamp is None else max(self._last_stamp, item.updated_at)
+        )
+        self._last_stamp = latest + timedelta(seconds=1)
+        return self._last_stamp

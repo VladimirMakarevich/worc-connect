@@ -11,7 +11,8 @@ is reachable at all.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import logging
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -32,8 +33,12 @@ from worc_connect.core.state import ItemRow, Phase, Stage, StateStore
 from worc_connect.core.triage import Verdict
 from worc_connect.core.worc_cli import WorcCommand
 from worc_connect.home import ConnectorHome
+from worc_connect.trackers.base import TrackerRateLimited
 
 pytestmark = pytest.mark.slow
+
+# A frozen clock a day past every stamp the stub hands out, for the one test that reads it.
+NOW = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -44,7 +49,12 @@ def store(home: ConnectorHome) -> Iterator[StateStore]:
 
 
 def watcher(
-    home: ConnectorHome, adapter: StubAdapter, store: StateStore, **config: object
+    home: ConnectorHome,
+    adapter: StubAdapter,
+    store: StateStore,
+    *,
+    now_fn: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
+    **config: object,
 ) -> Watcher:
     """A watcher with the analysis step on, unless a test says otherwise."""
     config.setdefault("research", ResearchMode.WORC)
@@ -54,6 +64,7 @@ def watcher(
         store=store,
         home=home,
         worc=WorcCommand(command="worc", repo_path=home.clone_path),
+        now_fn=now_fn,
     )
 
 
@@ -325,8 +336,10 @@ def test_the_reporter_answering_runs_triage_again_with_the_next_id(
 def test_a_needs_info_item_nobody_answered_is_left_alone(
     home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
 ) -> None:
-    # The trigger label is still on the item, so an arming rule that keyed off the label alone
-    # would start a fresh triage task on every single tick.
+    # The trigger label is still on, and the connector's own question — the label and the comment
+    # — moved the item's update stamp. Keyed off the label alone, or measured from the stamp the
+    # attempt started with, that would read as the reporter's answer and start a fresh triage task
+    # on every single tick.
     adapter = StubAdapter(items=[work_item()])
     loop = triaged(
         home,
@@ -336,11 +349,43 @@ def test_a_needs_info_item_nobody_answered_is_left_alone(
         report=report_text(Verdict.NEEDS_INFO, reason="which version?"),
     )
     loop.tick(dry_run=False)
+    asked = adapter.items[0].updated_at
+    assert asked > work_item().updated_at
+    assert live_row(store).item_updated_at == asked
 
     loop.tick(dry_run=False)
     loop.tick(dry_run=False)
 
     assert [row.seq for row in rows_of(store)] == [1]
+    assert [state for _, state, _ in adapter.states].count("needs-info") == 1
+
+
+def test_a_question_whose_stamp_cannot_be_read_back_is_measured_from_the_connectors_clock(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The write went through and the read right after it did not, so the connector's own clock at
+    # that moment stands in for the tracker's stamp. A reply inside the skew between the two clocks
+    # is missed, which costs nothing; a stale stamp would cost a triage run per tick.
+    adapter = StubAdapter(items=[work_item()])
+    loop = watcher(home, adapter, store, now_fn=lambda: NOW)
+    loop.tick(dry_run=False)
+    write_report(home, "gh-142", report_text(Verdict.NEEDS_INFO, reason="which version?"))
+    fake_worc.entries(**{"gh-142": "done"})
+    adapter.fetch_failures = [TrackerRateLimited("slow down")]
+
+    with caplog.at_level(logging.WARNING, logger="worc_connect.core.retrigger"):
+        loop.tick(dry_run=False)
+
+    assert live_row(store).item_updated_at == NOW
+    assert "action=retrigger result=stamped-from-clock (TrackerRateLimited" in caplog.text
+    loop.tick(dry_run=False)
+    assert [row.seq for row in rows_of(store)] == [1]
+
+    replied = NOW + timedelta(hours=1)
+    adapter.items = [work_item(labels=("worc", "worc:needs-info"), updated_at=replied)]
+    loop.tick(dry_run=False)
+
+    assert live_row(store).seq == 2
 
 
 # --- with the switch off -----------------------------------------------------------------------

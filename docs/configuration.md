@@ -131,7 +131,7 @@ Source: github item #142 by @reporter — https://github.com/OWNER/REPO/issues/1
 ```
 
 - **The id** is `<id_prefix>-<item number>`, and `<id_prefix>-<item number>.<n>` for every later attempt at the same item. An id is never reused.
-- **The title** is the item's, with whitespace collapsed and every control character, newline, `;`, backtick, `|` and `$(` removed, capped at 120 characters, and with every leading `-` stripped — worc's front-matter scan refuses all of those, and a refusal quarantines the task inside `.worc/`, where the connector may not look. An item whose title survives none of that is titled `Issue #<n>`.
+- **The title** is the item's, with whitespace collapsed and every control character, newline, `;`, backtick, `|` and `$(` removed, capped at 120 characters, and with the whole leading run of dashes stripped, whitespace inside the run included — worc's front-matter scan refuses all of those, and a refusal quarantines the task inside `.worc/`, where the connector may not look. An item whose title survives none of that is titled `Issue #<n>`.
 - **The branch** is `<branch_prefix>/<task id>-<slug>`, at most 50 characters: above that worc discards the name and generates its own, which the connector could then not find the pull request by. It always carries the `<branch_prefix>/` segment, so it can never collide with a base branch.
 - **The body** is the item's text, verbatim, under one provenance line. No acceptance criteria are invented for an item that carries none — enriching a thin report is worc's refinement step, not the connector's guess.
 - **A follow-up on an item whose previous pull request is still open** carries `branch_mode: existing` and `branch_ref` instead of `branch_name`, so worc continues that branch and appends to that pull request.
@@ -170,7 +170,7 @@ The report lands at `.worc-connect/triage/<task-id>/report.md` — the flow's de
 | Verdict | What happens |
 | --- | --- |
 | `actionable` | The implementation task is built from the report: its reason as the description, its acceptance criteria under `## Acceptance criteria`, and its failing test under `## Failing test`. The task gets the next id (`gh-142` triaged → `gh-142.2` implemented), so no id is ever reused. |
-| `needs-info` | The item is labelled `worc:needs-info` and the report's question is commented. When the reporter replies — the item's update stamp advances and the gate still admits it — triage runs again with the next id. |
+| `needs-info` | The item is labelled `worc:needs-info` and the report's question is commented. When the reporter replies — the item's update stamp moves past the connector's own question and the gate still admits it — triage runs again with the next id. The connector's own label and comment never count as the reply. |
 | `duplicate` | The item is labelled `worc:declined`; the comment names what it duplicates. |
 | `declined` | The item is labelled `worc:declined`; the comment says why. |
 

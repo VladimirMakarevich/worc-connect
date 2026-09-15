@@ -24,12 +24,26 @@ from support import (
     work_item,
 )
 from worc_connect.core import builder
+from worc_connect.core.sanitize import sanitize_title
 
 pytestmark = requires_worc
 
 # A title made of every token worc's front-matter scan refuses, led by the one that makes a value
 # look like a command-line flag.
 HOSTILE_TITLE = "-rm -rf /; echo | $(whoami)"
+
+# Leading runs of dashes broken by whitespace, and the flag shapes worc's forbidden-argument check
+# names. Each is refused by worc's scanner as written, and each has to leave the sanitizer as a
+# value that same scanner accepts.
+DASH_RUN_TITLES = (
+    "- -foo",
+    "-- --yolo",
+    "- - -x",
+    "- - -",
+    "--dangerously-skip-permissions",
+    "--sandbox=danger-full-access",
+    "-s danger-full-access",
+)
 
 
 @pytest.fixture
@@ -84,6 +98,38 @@ def test_a_title_that_sanitizes_to_nothing_still_passes(gate: object, clone: Pat
 
     assert result.passed is True, f"{result.reason}: {result.detail}"  # type: ignore[attr-defined]
     assert result.normalized.title == "Issue #142"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("raw", DASH_RUN_TITLES)
+def test_a_title_whose_dash_run_is_broken_by_whitespace_still_passes(
+    gate: object, clone: Path, raw: str
+) -> None:
+    draft = builder.build(work_item(title=raw), connector_config(clone), seq=1)
+
+    result = judge(gate, draft.content)
+
+    assert result.passed is True, f"{result.reason}: {result.detail}"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("raw", DASH_RUN_TITLES)
+def test_a_sanitized_title_passes_worcs_own_scanner(raw: str) -> None:
+    # Judged by the scanner itself rather than by our reading of it: the raw title is one it
+    # refuses, and the sanitized one has to be one it accepts.
+    from wastech_orchestrator.security.injection import scan_value
+
+    assert scan_value("title", raw) is not None
+    assert scan_value("title", sanitize_title(raw, fallback="Issue #142")) is None
+
+
+def test_every_substring_worcs_scanner_refuses_is_removed_from_a_title() -> None:
+    # The list is worc's, read from worc, so a token added there fails here instead of quarantining
+    # a task on a real run.
+    from wastech_orchestrator.security.injection import INJECTION_SUBSTRINGS, scan_value
+
+    for token in INJECTION_SUBSTRINGS:
+        sanitized = sanitize_title(f"a{token}b", fallback="Issue #142")
+        assert token not in sanitized
+        assert scan_value("title", sanitized) is None
 
 
 def test_a_re_triggered_task_continuing_a_branch_passes(gate: object, clone: Path) -> None:

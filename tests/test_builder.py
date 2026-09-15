@@ -49,6 +49,34 @@ def test_a_title_carries_no_token_worcs_injection_scan_refuses(raw: str) -> None
     assert not any(token in sanitized for token in (";", "`", "|", "$(", "\n", "\r"))
 
 
+# A leading run of dashes broken by whitespace, and the flag shapes worc's forbidden-argument check
+# names. Stripping one dash and the whitespace after it exposes the next one — `- -foo` becomes
+# `-foo` — which worc refuses for exactly the same reason.
+DASH_RUN_TITLES = (
+    "- -foo",
+    "-- --yolo",
+    "- - -x",
+    "- \t- -x",
+    "- - -",
+    "--dangerously-skip-permissions",
+    "--sandbox=danger-full-access",
+    "-s danger-full-access",
+)
+
+
+@pytest.mark.parametrize("raw", DASH_RUN_TITLES)
+def test_a_leading_run_of_dashes_is_stripped_whole_however_it_is_broken_up(raw: str) -> None:
+    sanitized = sanitize_title(raw, fallback="Issue #1")
+
+    assert not sanitized.startswith("-")
+    assert sanitized == sanitized.strip()
+
+
+def test_stripping_the_dash_run_keeps_the_words_behind_it() -> None:
+    assert sanitize_title("- -foo bar", fallback="Issue #1") == "foo bar"
+    assert sanitize_title("- - -", fallback="Issue #1") == "Issue #1"
+
+
 def test_a_title_that_sanitizes_to_nothing_falls_back_to_the_item_number() -> None:
     assert sanitize_title(";;; ``` ---", fallback="Issue #142") == "Issue #142"
     assert sanitize_title("", fallback="Issue #142") == "Issue #142"

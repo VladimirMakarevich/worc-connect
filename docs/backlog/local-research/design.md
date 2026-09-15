@@ -1,6 +1,6 @@
 # Design — Local research runtime
 
-Requirements: [requirements.md](requirements.md). Criteria: [acceptance-criteria.md](acceptance-criteria.md). Decisions are numbered `D1…D12`, independently of the [tracker-connector](../tracker-connector/design.md) record's own `D1…D16`.
+Requirements: [requirements.md](requirements.md). Criteria: [acceptance-criteria.md](acceptance-criteria.md). Decisions are numbered `D1…D16` (with `D6a`), independently of the [tracker-connector](../tracker-connector/design.md) record's own `D1…D16`.
 
 ## Overview
 
@@ -10,8 +10,8 @@ With `research.mode: local`, a gated item does not become a worc task straight a
 worc-connect watch (tick, never blocks)
   ├─ gate passes ──▶ label worc:researching ──▶ spawn detached:
   │                                              worc-connect research run <task_id>
-  │                                                ├─ git -C .worc-connect/repo.git fetch
-  │                                                ├─ git worktree add --detach .worc-connect/worktrees/<task_id> <base_ref>
+  │                                                ├─ git -C <workspace>/repo.git fetch
+  │                                                ├─ git worktree add --detach <workspace>/worktrees/<task_id> <base_ref>
   │                                                ├─ write RESEARCH_TASK.md (item body lives here, and nowhere else)
   │                                                ├─ agent[0] argv, cwd = worktree ──fails──▶ fresh worktree ──▶ agent[1] argv
   │                                                ├─ copy report.md ──▶ .worc-connect/research/<task_id>/report.md
@@ -21,6 +21,8 @@ worc-connect watch (tick, never blocks)
 ```
 
 worc sees nothing until the last arrow. That is the whole point of the record.
+
+Two arrows in that diagram are **open**: which process writes `RESEARCH_TASK.md` ([R-21](questions.md#open) — the child is launched with a `task_id` and no item text), and — until R-18 was answered on 2026-09-12 — what makes "next tick" happen at all for a research that outlived the tracker's listing window; it is now a second pass over the store's live rows, described under Control flow. The directory the report is copied into is the one the shipped build already owns and spells `triage/`, not `research/`; renaming it is a change to phase 07's flow contract, made in that folder or not at all.
 
 ## Decisions
 
@@ -43,21 +45,37 @@ class ResearchProvider(Protocol):
     def cancel(self, task_id: str) -> None: ...
 ```
 
-`worc` (tracker-connector phase 07) and `local` (this record) implement it; `cli.py`, the composition root, picks one from `research.mode` and injects it, and constructs **neither** under `off` — the loop's research branch is not entered at all, so the `off` connector is the one phases 03–06 built, not a research connector with a flag turned down. `core/` never imports `worc_connect.research`, enforced by a new `import-linter` contract, exactly as it never imports a tracker adapter.
+`local` (this record) implements it. `worc` does **not** — see the decision below — so the composition root branches on `research.mode`, injects the local provider where the mode asks for one, and constructs nothing at all under `off` — the loop's research branch is not entered at all, so the `off` connector is the one phases 03–06 built, not a research connector with a flag turned down. `core/` never imports `worc_connect.research`, enforced by a new `import-linter` contract, exactly as it never imports a tracker adapter.
 
 **Why.** The operator asked for all three to be independent and switchable in one line: no research at all, research through worc, or native research. The worc-side path keeps its sandbox for anyone who wants it, the local path keeps the queue free, `off` keeps the connector as simple as it is today, and the half after the report stays shared by all of them. **Rejected.** Replacing phase 07 (it is designed, it is the safer path, and it is the fallback on a host with no agent CLI); and a pair of keys (`enabled` + `mode`), which spells the same three modes with four combinations, one of them meaningless.
 
+**Decided (R-19, 2026-09-12): the symmetry is in the configuration, not in the code.** The protocol above describes the **local** producer only. The worc path stays exactly as phase 07 shipped it — `Stage.RESEARCH` plus `_draft` / `_hand_over` / `_follow_task` / `_after_research` in `core/reconcile.py`, publishing `worc:queued` and `worc:in-progress` on the item while its triage task runs, and offering no `cancel`, because a task handed to worc is worc's and that is an invariant rather than an omission. What the operator asked for is one key that selects three complete modes, and that is delivered by the composition root branching on `research.mode`; forcing both producers through one protocol would have been two shapes wearing one name, paid for with a rewrite of a landed path. The symmetry that earns its keep is downstream of the report, where one reader, one builder and one write-back already cannot tell the producers apart.
+
 ### D3 — The connector's own clone, never worc's
 
-**Decision.** `.worc-connect/repo.git` is a bare clone of the same origin, created on first use (`git clone --bare`, push URL disabled — D12), fetched before every research. Worktrees live at `.worc-connect/worktrees/<task_id>`, detached at `research.base_ref`, which defaults to the clone's own default branch — `origin/HEAD`, set by `git clone --bare` and refreshed with `git remote set-head origin -a` on each fetch, so a repository on `master` or `develop` needs no configuration and no API call is made to learn it (R-11). `git worktree remove --force` on the way out; `git worktree prune` plus a sweep of orphaned directories at startup.
+**Decision.** `<workspace>/repo.git` is a bare clone of the same origin, created on first use (`git clone --bare`, push URL disabled — D12), fetched before every research, where `<workspace>` is `research.workspace` — a root **outside worc's clone**, defaulting to `~/.worc-connect/<owner>__<repo>/` (R-20). Worktrees live at `<workspace>/worktrees/<task_id>`, detached at `research.base_ref`, which defaults to the clone's own default branch — `origin/HEAD`, set by `git clone --bare` and refreshed with `git remote set-head origin -a` on each fetch, so a repository on `master` or `develop` needs no configuration and no API call is made to learn it (R-11). `git worktree remove --force` on the way out; `git worktree prune` plus a sweep of orphaned directories at startup.
 
 **Why.** Two reasons, both practical. worc runs `git` in its clone constantly — branches, checkouts, commits, pushes — and a second process adding worktrees there would race it on `.git` metadata for no benefit. And the tracker-connector invariant "no `git` in worc's clone" survives untouched, so nothing about worc's working tree can be disturbed by a research run. **Rejected.** A worktree of worc's clone (races, and it puts the agent one `cd ..` away from the tree worc is mid-commit on).
+
+**Where it lives, and why that is not `.worc-connect/` (R-20, decided 2026-09-12).** `ConnectorHome.beside()` resolves the connector's home to `<worc's clone>/.worc-connect/`, so writing the paths as `.worc-connect/repo.git` would have put the bare clone and every worktree **inside the working tree worc commits and pushes from** — the arrangement this decision rejects, reached by `cd ../../..` instead of `cd ..`. The workspace therefore moves out; the **run directories do not**, and the reasoning was checked against worc's own source rather than against a rule.
+
+_What was withdrawn._ An earlier draft argued that `git clean -xfd` in worc's clone would delete a research mid-run. worc never runs `git clean` at all — every occurrence of the word in its source is the `worc logs clean` / `worc runs clean` subcommand, which touches no repository. So `research/<task_id>/` stays in `.worc-connect/` beside `state.db` and `triage/`, and the home is not split for a danger that does not exist.
+
+_What survives, example one — shared refs, objects and hooks._ A worktree of worc's clone is not an isolated repository: it shares the object store, every ref and the repository's hooks. With worc mid-task on `worc/gh-140`, an agent that runs `git branch -D worc/gh-140` deletes the branch worc is committing to; `git gc` rewrites the object store underneath it; and because `core.hooksPath` is repository-wide, the agent's first `git commit` executes worc's hooks. worc watches exactly these surfaces: `GitControlState` in its `git_manager.py` fingerprints HEAD, the index, the task ref, repo-local and worktree config, `core.hooksPath`, the hooks themselves, the operation markers and the push URL, before and after **every** provider attempt — advisory in a supervisor turn, and in a writing node the drift reaches the node's outcome and a human is asked about it. None of that is reachable from a clone worc has never heard of.
+
+_What survives, example two — the ancestor walk._ Agent CLIs read project context upward through the directory tree: `CLAUDE.md`, `.claude/settings*`, `AGENTS.md` from every parent. With `repo: acme/widgets` and worc's clone at `/home/op/widgets`, a worktree at `/home/op/widgets/.worc-connect/worktrees/gh-142/` means the agent reads its own `CLAUDE.md` (the one pinned at `origin/HEAD`, correct) **and** `/home/op/widgets/CLAUDE.md` — the copy in worc's live working tree, which may be a half-finished edit on `worc/gh-140`, together with that clone's `.claude/settings.local.json` permissions. "The research runs on a clean tree at `origin/HEAD`" quietly stops being true. At `/home/op/.worc-connect/acme__widgets/worktrees/gh-142/` the same walk finds nothing but the operator's home directory.
+
+_The limit of the guard, stated so nobody mistakes it for a boundary._ The agent runs with the operator's own permissions, so `cd /home/op/widgets` on purpose still works, exactly as `gh pr create` still works with the push URL disabled. A separate workspace removes the **accident** — a stray `cd ..`, a `git` command aimed at the wrong repository, an inherited ancestor instruction file — and removes nothing an adversary would do deliberately. That is the same class of guard as the disabled push URL, and [D12](#d12--the-blast-radius-is-the-worktree-and-that-is-the-whole-of-it) is where the deliberate case is answered.
+
+_Concurrency._ `fetch` runs **once per tick in the parent**, before any child is spawned, so N children never race the same bare clone's refs; every clone-level operation (`fetch`, `worktree add`, `worktree remove`, `prune`) takes a short-lived `clone.lock` in the workspace, held for the seconds the operation takes rather than for the research. Up to `max_concurrent` detached worktrees exist at once — the same shape as running several agents in parallel worktrees of one repository, just of a clone that is the connector's own.
 
 ### D4 — A child process per research, files as the state
 
 **Decision.** The tick spawns `worc-connect research run <task_id>` detached (`start_new_session=True` on POSIX, `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` on Windows) and never waits on it. The child owns the whole research: worktree, agent chain, timeout, cleanup, outcome. State lives in `.worc-connect/research/<task_id>/`: `run.json` (pid, started_at, item, agent chain), `RESEARCH_TASK.md` (a copy of what the agent was given), `agent.log`, `report.md`, `outcome.json`. `outcome.json` is written atomically and is the only "done" signal.
 
 **Why.** The loop stays a loop: start, poll, dispatch. A restart re-adopts by reading `run.json` and checking liveness (PID plus `started_at` against the process's own start time, so a recycled PID is not mistaken for the child). Timeout and fallback logic lives where it can act — inside the child — instead of inside a tick that must return in milliseconds. **Rejected.** Threads in the connector process (a restart loses the work and kills the agent mid-run) and a single research queue in the parent (one slow agent stalls everything).
+
+**Open ([R-21](questions.md#open)).** The child is launched with a `task_id` and nothing else, and `run.json` carries the item's id and update stamp, not its text — so as written there is no way for the child to render `RESEARCH_TASK.md` at all without reading the item from the tracker again, which would put an adapter inside `research/` and would research text the run did not start on ([D14](#d14--a-research-finishes-on-the-text-it-started-with)). The parent rendering it at `start()`, with the child copying it into each fresh worktree, is the shape the data section already implies and the one that keeps both properties.
 
 ### D5 — The model proposes, the builder still decides
 
@@ -67,7 +85,7 @@ class ResearchProvider(Protocol):
 
 **Decision.** The item's title, body, URL and author go into `RESEARCH_TASK.md` in the worktree root. The agent argv is a fixed sentence from the shipped profile — `claude -p "Read RESEARCH_TASK.md in the repository root and follow it" --output-format json`, `codex exec "Read RESEARCH_TASK.md in the repository root and follow it"` — plus whatever constant flags the operator configured. No item-derived value is ever an argument, an environment value or a log line.
 
-**Why.** It is the tracker-connector invariant, and independently it is the only thing that works: issue bodies carry newlines, quotes, backticks and non-ASCII, and Windows caps a command line at ~32k characters.
+**Why.** It is the tracker-connector invariant, and independently it is the only thing that works: issue bodies carry newlines, quotes, backticks and non-ASCII, and Windows caps a command line at ~32k characters. Which process writes the file is [R-21](questions.md#open); that it is a file is not in question.
 
 ### D6a — The shipped profiles are constants, and `doctor` shows them in full
 
@@ -85,11 +103,13 @@ class ResearchProvider(Protocol):
 
 **Decision.** `timeout_seconds: 0` or the key absent means the attempt is never killed by the clock. A positive value arms a timer in the child: terminate, grace period, kill the process group, record the attempt as failed, continue the chain.
 
-**Why (and what replaces the timer).** The operator's call: a research that is genuinely working should not be shot at an arbitrary minute. The bound moves to the operator instead of the clock — `worc-connect status` lists every running research with agent, item, elapsed time and PID, and `worc-connect research cancel <task_id>` terminates one (the child cleans its worktree and writes an outcome of `cancelled`, which follows `on_failure`). `max_concurrent` caps how much can be in flight regardless.
+**Why (and what replaces the timer).** The operator's call: a research that is genuinely working should not be shot at an arbitrary minute. The bound moves to the operator instead of the clock — `worc-connect status` lists every running research with agent, item, elapsed time and PID, and `worc-connect research cancel <task_id>` terminates one (the child cleans its worktree and writes an outcome of `cancelled`, which follows `on_failure`). `max_concurrent` caps how much can be in flight regardless — and because that cap is also how this decision fails, a tick that starts nothing because the cap is full logs one line naming how many gated items are waiting, and `status` shows the same. Two hung agents holding both slots is the shape of "no timeout" going wrong, and without that line it is invisible: a waiting item carries no label and gets no comment, because the label is applied when its child starts.
 
 ### D9 — `worc:researching` is a real state
 
-**Decision.** A seventh connector state, `researching`, between `gated` and `staged`, mapped by the GitHub adapter to `worc:researching`. Applied when the child starts, replaced when the report is dispatched. One state label at a time, as everywhere else.
+**Decision.** An **eighth** connector state, `researching`, between `gated` and `staged`, mapped by the GitHub adapter to `worc:researching`. Applied when the child starts, replaced when the report is dispatched. One state label at a time, as everywhere else.
+
+**A note on the count.** The shipped build has seven (`queued`, `in-progress`, `pr-open`, `done`, `failed`, `needs-info`, `declined`), and the repository already miscounts them in two places: `.agents/rules/architecture.md` says "Seven connector-owned states" in one sentence, and `core/items.py`'s own docstring says "These six (eight with triage on)". Phase 01 corrects both while it adds the eighth, rather than adding a third number to the pile.
 
 **Why.** Without it a gated issue sits with `worc:queued` and no task in `worc list` for as long as the research runs — which, with no timeout, can be a while. The operator asked for the state to be visible.
 
@@ -107,9 +127,13 @@ class ResearchProvider(Protocol):
 
 ### D12 — The blast radius is the worktree, and that is the whole of it
 
-**Decision.** No sandbox, by the operator's explicit choice. What is in place instead costs nothing and is kept: the agent runs in a disposable detached worktree of a clone whose **push URL is disabled** (`git remote set-url --push origin DISABLED` at creation), with the connector's own environment and no forwarded secrets, on a prompt template that states the research is read-only; the worktree is removed at the end of every attempt. What is _not_ in place, stated plainly so nobody is surprised later: the agent may run arbitrary commands on the operator's machine with the operator's own permissions, on text written by strangers on the internet. The gate (an explicit maintainer label or an author allow-list) is the only filter between an issue author and that agent, which makes it the security perimeter of this feature, not just of the queue.
+**Decision.** No sandbox, by the operator's explicit choice. What is in place instead costs nothing and is kept: the agent runs in a disposable detached worktree of a clone whose **push URL is disabled** (`git remote set-url --push origin DISABLED` at creation), with the connector's own environment, on a prompt template that states the research is read-only; the worktree is removed at the end of every attempt. What is _not_ in place, stated plainly so nobody is surprised later: the agent may run arbitrary commands on the operator's machine with the operator's own permissions, on text written by strangers on the internet. The gate (an explicit maintainer label or an author allow-list) is the only filter between an issue author and that agent, which makes it the security perimeter of this feature, not just of the queue.
 
 **Why.** The operator weighed it and chose the lightweight runtime; the record's job is to state the trade rather than re-litigate it. The two cheap guards (no push, disposable tree) are in because they cost a line each.
+
+**Open ([R-22](questions.md#open)).** This decision used to claim "no forwarded secrets" in the same breath as "the connector's own environment", and those are one environment: the shell that started `watch` holds the operator's `GH_TOKEN`, `ANTHROPIC_API_KEY`, `SSH_AUTH_SOCK` and whatever else. The claim is removed above rather than repeated; what replaces it — an allow-list, a deny-list, or the plain admission that the agent inherits everything — is the question. **Open ([R-23](questions.md#open)):** and if the gate is this feature's perimeter, `gate.allow_all: true` is the configuration that removes the perimeter while leaving the agent, which this record permits today and says nothing about.
+
+**What is in `agent.log`.** Whatever the agent printed, which is whatever the agent read — the item's text, and also any file on the operator's machine it chose to open. [D16](#d16--retention-is-the-operators-setting-with-a-cap-that-always-applies) governs how long that file lives; this is the paragraph that says what it can contain.
 
 ### D13 — One quoted paragraph reaches the item, defused
 
@@ -131,7 +155,7 @@ class ResearchProvider(Protocol):
 
 **Decision.** `worc-connect research cancel` is a documented command, not a debugging aid: it accepts a `task_id`, `--item <n>`, or `--all`, and it ends **both** processes — the research child and the agent the child launched. Their PIDs are recorded side by side in `run.json` (`pid`, `agent_pid`), so an agent orphaned by a dead child is still killable, and a cancel that finds nothing alive says so and cleans up instead of failing. The child writes `outcome.json` with `cancelled`, its worktree is removed, and `on_failure` decides what the item gets.
 
-The mechanism is the same on Windows, Linux and macOS and uses **no signals**: the agent is started in its own process group (`start_new_session=True` on POSIX, `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` on Windows), cancel terminates the group and escalates to a kill after a grace period, and liveness is a PID plus start-time check rather than `signal(0)` semantics. The whole seam lives in one module (`research/process.py`) and both platform branches are exercised by injection, never by the host OS the tests happen to run on.
+The mechanism is the same on Windows, Linux and macOS: the agent is started in its own process group (`start_new_session=True` on POSIX, `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` on Windows), cancel terminates the group and escalates to a kill after a grace period, and liveness is a PID plus start-time check rather than `signal(0)` semantics. **No signal is used for control flow** — that stays files, as everywhere else in this connector — but ending a process on POSIX _is_ a signal (`os.killpg`, and `taskkill /T` or `TerminateProcess` on Windows), and an earlier draft of this decision said "no signals" flatly, which would have sent the implementation looking for a mechanism that does not exist. Killing is the platform's own call; control is never a signal. The whole seam lives in one module (`research/process.py`) and every platform branch is exercised by injection, never by the host OS the tests happen to run on. There are **three** of them, not two: the start time that makes a recycled PID detectable is `/proc/<pid>/stat` on Linux, a `ps` field or a `sysctl` on macOS, and a `ctypes` call to `GetProcessTimes` on Windows — and NFR-R5 rules out solving it with `psutil`.
 
 **Why.** Without a clock bound, the operator is the bound — so ending a run has to be one obvious command that always works, including after the connector itself was restarted or crashed. And this is the piece of the runtime most likely to behave differently on Windows, which is where the repository's cross-platform rule bites hardest.
 
@@ -151,6 +175,7 @@ research:
   # - name: claude-custom
   #   command: claude                     # resolved with shutil.which
   #   args: ["-p", "Read RESEARCH_TASK.md in the repository root and follow it"]
+  workspace: ~/.worc-connect/acme__widgets # `local` only: where repo.git and worktrees/ live — outside worc's clone (R-20)
   base_ref: origin/HEAD # default: the clone's own default branch (R-11)
   timeout_seconds: 0 # 0 or absent = no timeout at all (D8)
   max_concurrent: 2
@@ -160,14 +185,19 @@ research:
   keep_worktree: false # debugging aid; leaves the tree behind
 ```
 
+`workspace` defaults to `~/.worc-connect/<owner>__<repo>/`, derived from the `repo` pin, and an operator sets it only to move the clone to another disk. It holds the two things that may not live inside worc's clone — the bare clone and the worktrees (R-20) — while everything else the runtime writes stays in the connector's home beside `state.db`.
+
 The three modes are independent and each is a complete configuration on its own: `off` ignores every other key in the block, `worc` reads `flow` and nothing local, `local` reads the local keys and never installs a flow. A key belonging to another mode is ignored, never silently half-applied; a key **required** by the selected mode and missing is a refusal that names it (`mode: local` with no `agents`, `mode: worc` with no `flow`). Switching modes is one line and needs no other edit, and `off` is the default.
 
 ## Data & stored shapes
 
 ```text
-.worc-connect/
+<research.workspace>/            outside worc's clone; default ~/.worc-connect/<owner>__<repo>/
   repo.git/                      bare clone the connector owns (push URL disabled)
   worktrees/<task_id>/           detached worktree, removed when the attempt ends
+  clone.lock                     held across fetch / worktree add / remove / prune, never across a research
+
+<worc's clone>/.worc-connect/    the connector's home, unchanged — worc never runs `git clean` here
   research/<task_id>/
     run.json                     {pid, agent_pid, started_at, item_id, item_updated_at, task_id, agents, attempt}
     RESEARCH_TASK.md             what the agent was given, kept for audit
@@ -177,6 +207,8 @@ The three modes are independent and each is a complete configuration on its own:
     research.lock                exclusive create; one research per task_id
 ```
 
+`RESEARCH_TASK.md` is listed in the **run** directory rather than only in the worktree on purpose — it is what the parent rendered and what each attempt copies in ([R-21](questions.md#open)). `research.lock` is an exclusive create and therefore does not release itself when a child dies: a stale lock only ever blocks its own `task_id`, which is never reused, and the crash path reports the research as `failed` through the missing `outcome.json` — but the startup sweep removes it anyway, so a run directory is never left in a state that reads as "running" forever.
+
 `outcome.json.state` is one of `report` (a report exists and parses), `failed`, `cancelled`. The connector's SQLite row gains `research_state` and `research_started_at`; like every other column it is a cache — deleting `state.db` is still safe, because a row is rebuilt from the label, `worc list` and these files.
 
 ## Control flow & state
@@ -185,11 +217,13 @@ The per-item phase becomes `seen → gated → researching → staged → queued
 
 Each tick, for rows in `researching`:
 
-1. `outcome.json` present → read it. `state: report` → hand the report to the shared reader; `actionable` runs the builder (body = report draft + provenance naming the agent), any other verdict writes back per phase 07. `failed` / `cancelled` → follow `on_failure` (D10). Then clear the run directory except the report and the outcome, and drop the label.
+1. `outcome.json` present → read it. `state: report` → hand the report to the shared reader; `actionable` runs the builder (body = report draft + provenance naming the agent), any other verdict writes back per phase 07. `failed` / `cancelled` → follow `on_failure` (D10). Then apply `retain` to the run directory — which is [D16](#d16--retention-is-the-operators-setting-with-a-cap-that-always-applies)'s to decide and not this paragraph's, `never` included — and drop the label.
 2. No outcome, child alive → nothing; the tick returns.
 3. No outcome, child dead → a crashed research; record it as `failed` and follow `on_failure`.
 
 For rows in `gated` with a free slot under `max_concurrent`: create the run directory, take `research.lock`, label `worc:researching`, spawn the child, write `run.json`.
+
+**Where those rows come from (R-18, decided 2026-09-12).** "Rows in `researching`" is not something `Watcher.tick` can iterate today: it walks the items the tracker listed since the watermark less ten minutes, and `StateStore.rows()` has exactly one caller in the whole build — `status`. A research that runs longer than its item stays in that window would never be read back, and with `timeout_seconds: 0` that is the common case rather than the rare one. So the tick gains a **second pass**: the store's live rows, with `adapter.get_item` resolving only the ones the listing did not already return. The cost is measured, not assumed — `list_items` is one `gh` call whatever the window, `current_state` makes none, `get_item` is one per row — so a tick with nothing in flight costs exactly nothing extra, and a tick with research costs at most `max_concurrent` calls. Holding the watermark back was rejected for the opposite reason: it stays one call, but the page grows with the longest research and `gh issue list --limit 200` truncates the newer end, so one long research would starve every new item.
 
 At startup: `git worktree prune`, adopt every `run.json` whose process is alive, and treat the rest as crashed.
 
@@ -204,9 +238,9 @@ At startup: `git worktree prune`, adopt every `run.json` whose process is alive,
 | `research/worktree.py` | clone creation, fetch, `worktree add/remove/prune`, orphan sweep |
 | `research/agents.py` | shipped profiles, argv assembly, launch, timeout, the fallback chain |
 | `research/prompt.py` | `RESEARCH_TASK.md` rendering |
-| `research/process.py` | detached spawn, liveness, terminate/kill — the platform seam |
+| `research/process.py` | detached spawn, liveness, terminate/kill — the platform seam, in **three** branches (Linux `/proc`, macOS `ps` / `sysctl`, Windows `GetProcessTimes`) because the start time that defeats a recycled PID has no portable reading |
 
-`import-linter` gains: `worc_connect.core` must not import `worc_connect.research`; `worc_connect.research` must not import `worc_connect.cli` or `worc_connect.config` (it takes shapes, not files).
+`import-linter` gains: `worc_connect.core` must not import `worc_connect.research`; `worc_connect.research` must not import `worc_connect.cli` or `worc_connect.config` (it takes shapes, not files). Because of that second contract the settings the runtime reads — agents, base ref, timeout, retention, the cap — are a shape declared in `core/research.py` and built from `ConnectorConfig` by the composition root, not `ResearchConfig` itself.
 
 ## What changes in existing code
 
@@ -219,4 +253,9 @@ At startup: `git worktree prune`, adopt every `run.json` whose process is alive,
 | `core/writeback.py`, `trackers/github/adapter.py` | the `researching` state and its label |
 | `core/builder.py` | provenance naming the producing agent; otherwise the phase 07 report path unchanged |
 | `core/writeback.py` | the `researching` state, and the bound on the published `reason` (D13) for both producers |
-| `AGENTS.md`, `.agents/rules/architecture.md`, `.agents/rules/security.md`, `README.md` | D1: the invariant rewritten, the new posture (D12) documented for the operator |
+| `core/items.py` | the eighth `ItemState`, and the stale docstring that counts them wrong today |
+| `home.py` | the run directories this runtime owns, plus the resolution of `research.workspace` — a root outside the clone, defaulted from the `repo` pin (R-20) |
+| `docs/configuration.md` | every `research.*` key, and the line that currently says this build refuses `mode: local` by name |
+| `AGENTS.md`, `.agents/rules/architecture.md`, `.agents/rules/security.md`, `README.md` | D1: the invariant rewritten, the new posture (D12) documented for the operator; in `architecture.md` that is two sections, not one — "The model boundary" **and** the State section's state count and "one worc task (two with triage on)" |
+
+**A note on size.** `core/loop.py` stands at 453 lines of its 500-line budget, `core/reconcile.py` at 433, `cli.py` at 346. This record adds a dispatch branch to the first and three commands (`doctor`, `research run`, `research cancel`) plus `status` lines to the third. The budget is a ratchet that may not be raised, so the split is part of the phase that adds the code — named in [plan/03-research-child.md](plan/03-research-child.md) and [plan/04-dispatch.md](plan/04-dispatch.md) — and not a surprise at commit time.

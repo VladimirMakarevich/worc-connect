@@ -1,6 +1,6 @@
 # Local research runtime — the connector researches before it queues
 
-Status: **ready-to-implement** Date: 2026-09-11 Owner: Vladimir Makarevich Slug: `local-research`
+Status: **needs-decisions** Date: 2026-09-11 Owner: Vladimir Makarevich Slug: `local-research`
 
 ## Summary
 
@@ -15,6 +15,8 @@ The three ways to run the connector are **one switch with three independent valu
 This record deliberately **removes a hard invariant** of the connector ("No agent runtime"). That change, and the documents it touches, is phase 01's first step; see [D1](design.md#d1--the-connector-gets-an-agent-runtime-deliberately).
 
 These documents are design detail, not an implementation contract, and must not override the hard invariants in `CLAUDE.md`, `AGENTS.md`, or `.agents/rules/` as they read at implementation time. The code remains the source of truth; this folder leaves the queue once the work lands.
+
+**Five questions are open, and they block phase 01.** A review on 2026-09-12 — after every document below had been signed off — read this record against the code that actually shipped and found seven shapes it does not pin down. Three were answered the same day: the symmetry between the three modes lives in the **configuration** and not in the code, so only the local producer goes behind the protocol (R-19); a finished research is noticed by a second pass over the store's own live rows, which costs a quiet tick nothing (R-18); and the bare clone and its worktrees live in a `research.workspace` outside worc's clone, while the run directories stay in the connector's home (R-20, decided against worc's own source). The four still open are the id a local research is keyed by, who renders the prompt file, what environment the agent gets, and whether `gate.allow_all` stays legal with `mode: local` — [R-17, R-21, R-22, R-23](questions.md#open), with an **Open** marker in every document one of them decides. None of this is a change of direction: they are the seams the phases would otherwise have had to invent mid-implementation.
 
 ## Documents
 
@@ -39,6 +41,8 @@ These documents are design detail, not an implementation contract, and must not 
 
 ## Change log
 
+- 2026-09-12 — three of the seven review questions were decided with the operator: R-19 (the symmetry between modes is in the configuration, not in the code), R-18 (a second pass over the store's live rows dispatches a finished research; costs measured against `gh`), and R-20 (a `research.workspace` outside worc's clone for `repo.git` and `worktrees/`, run directories staying in the connector's home). R-20 was settled against the orchestrator's own source: worc creates no worktrees and never runs `git clean`, which withdrew one argument, while its `GitControlState` fingerprint and the agent CLIs' ancestor walk carried the decision.
+- 2026-09-12 — the record was reviewed against the shipped code before implementation started. Seven questions were opened ([R-17…R-23](questions.md#open)); six contradictions inside the record were corrected in place (the default mode in [out-of-scope.md](out-of-scope.md), the retention rule against the control-flow description, the report directory's real name, the "no signals" wording, the platform count, and AC-R9's "identical" claim); and eight implementation risks the plan did not carry were added to [plan/README.md](plan/README.md). The folder left `ready-to-implement` for `needs-decisions`.
 - 2026-09-11 — the operator signed off every document and set the folder to `ready-to-implement`. Implementation order is 01 → 02 → 03 → 04 → 05; nothing is blocked from outside this repository.
 - 2026-09-11 — folder scaffolded from the design conversation of the same day. The operator chose the local runtime over a worc-side triage lane after the trade-off was laid out, and decided: the two providers coexist; a new `worc:researching` state; the report format is taken from phase 07 unchanged; a `doctor` precondition check; no timeout unless the operator asks for one; both Claude Code and Codex with fallback. Nothing implemented.
 - 2026-09-11 — tracker-connector phase 07 landed while this record was being drafted, already carrying the `research.mode` vocabulary decided here, with `local` reserved and refused by name (`IMPLEMENTED_RESEARCH_MODES` in `config.py`). Phase 01 of this record turns that refusal into the second provider; phase 04's dependency is satisfied.

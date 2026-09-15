@@ -4,7 +4,7 @@ Testable form of [requirements.md](requirements.md). Integration criteria are dr
 
 ### AC-R1 — the switch (FR-R1)
 
-- **Given** `research.mode: off` → **When** a gated item is processed → **Then** no research directory, no worktree, no child process and no `worc:researching` label exist; the behaviour is byte-identical to today's.
+- **Given** `research.mode: off` → **When** a gated item is processed → **Then** no research directory, no worktree, no child process and no `worc:researching` label exist; every artefact a test can compare — the task file's bytes, the labels, the comment bodies — is identical to today's.
 - **Given** `research.mode: worc` → **Then** the phase 07 path runs and nothing from this record is reachable.
 - **Given** `research.mode: local` → **Then** the research path runs and no triage task is written into `tasks/preparing/`.
 - **Given** `mode: off` with a full `agents` / `flow` configuration still present → **Then** it is ignored entirely: no provider is constructed, no precondition check runs, nothing is refused.
@@ -15,10 +15,14 @@ Testable form of [requirements.md](requirements.md). Integration criteria are dr
 
 - **Given** a fake agent that sleeps → **When** a tick processes the gated item → **Then** the tick returns while the child is still alive, the item carries `worc:researching`, and `tasks/preparing/` is empty; a second tick also returns without waiting.
 - **Then** no `worc` process is launched for that item until the outcome exists.
+- **Given** a running research whose item the tracker no longer lists (the watermark has moved past it, as it does within ten minutes in any active repository) → **When** the child finishes → **Then** a later tick still reads `outcome.json` and dispatches it.
+- **Then** a tick with no research in flight makes no `gh` call beyond the listing it already made, and a tick with research in flight makes at most one `get_item` per row the listing did not return (R-18).
 
 ### AC-R3 — the worktree lifecycle (FR-R3)
 
-- **Given** a research → **Then** the worktree is created under `.worc-connect/worktrees/<task_id>`, detached at `base_ref`, and removed when the attempt ends; `keep_worktree: true` leaves it.
+- **Given** a research → **Then** the worktree is created under `<research.workspace>/worktrees/<task_id>`, detached at `base_ref`, and removed when the attempt ends; `keep_worktree: true` leaves it.
+- **Then** neither the bare clone nor any worktree resolves to a path inside worc's clone, with the default `workspace` and with a configured one alike — asserted on the resolved absolute paths, so no `..` segment can walk back in (R-20).
+- **Then** the run directory stays in the connector's home (`.worc-connect/research/<task_id>/`), and a fetch or a worktree operation takes `clone.lock` while a second child waits rather than racing it.
 - **Given** no `base_ref` configured and an origin whose default branch is `develop` → **Then** the worktree is based on `develop` through `origin/HEAD`, with no `gh` call recorded; a configured `base_ref` wins over it.
 - **Then** no `git` process runs with worc's clone as its working directory or `-C` argument, in any recorded launch.
 - **Given** a leftover worktree from a killed run → **When** the connector starts → **Then** it is pruned and its directory removed.
@@ -48,6 +52,7 @@ Testable form of [requirements.md](requirements.md). Integration criteria are dr
 
 - **Given** `max_concurrent: 2` and three gated items → **Then** two children exist, the third item stays `gated` and starts on a later tick.
 - **Given** a research already running for a `task_id` → **When** a tick runs again → **Then** no second child is started (the lock file holds) and nothing is duplicated.
+- **Given** the cap is full and gated items are waiting → **Then** the tick logs one line naming how many are waiting and `status` reports the same, so two hung agents holding both slots are visible without reading the process table.
 
 ### AC-R8 — restart safety (FR-R4, NFR-R2)
 
@@ -57,7 +62,7 @@ Testable form of [requirements.md](requirements.md). Integration criteria are dr
 
 ### AC-R9 — the report is dispatched exactly as phase 07 dispatches it (FR-R10)
 
-- **Given** a report per verdict (`actionable`, `needs-info`, `duplicate`, `declined`) → **Then** the resulting task file, labels and comments are identical to the ones the `worc` provider produces from the same report bytes, except for the provenance line naming the local agent.
+- **Given** a report per verdict (`actionable`, `needs-info`, `duplicate`, `declined`) → **Then** the resulting task file, labels and comments are identical to the ones the `worc` provider produces from the same report bytes, modulo two things that cannot match: the provenance line naming the local agent, and the task id and branch, because the two paths allocate sequence numbers differently until [R-17](questions.md#open) is decided.
 - **Given** a `report.md` with no parsable verdict block → **Then** the attempt is a failure (AC-R5), not an `actionable` default.
 
 ### AC-R9a — what of the report is published (FR-R10a)
@@ -88,6 +93,8 @@ Testable form of [requirements.md](requirements.md). Integration criteria are dr
 ### AC-R12 — preconditions refuse early (FR-R12)
 
 - **Given** `research.mode: local` and an unresolvable `git`, or no resolvable agent, or an unwritable home → **When** `watch` starts → **Then** it exits non-zero naming the failing check, before a single item is read.
+- **Given** the same configuration and an origin that cannot be reached → **When** `watch` starts → **Then** it **does** start: an unreachable remote costs one tick like every other infrastructure failure, and no gated item is researched or queued raw on that tick.
+- **Given** a `git` with no credential helper for a private origin → **Then** the clone attempt fails with a named error rather than hanging a detached child on a password prompt (terminal prompting is disabled on every `git` the connector launches).
 - **Then** `doctor` reports every check, the connector clone's state, and any adopted or orphaned research.
 
 ### AC-R13 — the research clone cannot publish (FR-R13)
@@ -104,6 +111,6 @@ Testable form of [requirements.md](requirements.md). Integration criteria are dr
 
 ### AC-R15 — cross-platform (NFR-R1)
 
-- **Then** the detached-spawn, liveness, terminate-and-escalate and cancel seams are exercised on **both** platform branches by injecting the platform, not by depending on the host; no code path uses a signal for control flow.
+- **Then** the detached-spawn, liveness, terminate-and-escalate and cancel seams are exercised on **every** platform branch by injecting the platform, not by depending on the host — three of them for the start-time check (Linux `/proc`, macOS `ps` / `sysctl`, Windows `GetProcessTimes`), because a recycled PID has to be detectable on macOS too. No code path uses a signal for **control flow**; ending a process does use the platform's own kill, which on POSIX is a signal, and no criterion asks otherwise.
 - **Then** an agent launcher resolves as `claude.cmd` / `codex.cmd` on the Windows branch and as the bare names on POSIX.
 - **Then** stored paths compare via `Path.as_posix()`, `outcome.json` is written atomically (temp + `os.replace`), and the whole suite passes on Windows, Linux and macOS.

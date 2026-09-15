@@ -4,7 +4,7 @@ Scope fence for [requirements.md](requirements.md). This record covers **who pro
 
 ## Not in this task
 
-- **Replacing the worc-side triage path** — tracker-connector phase 07 stays, is implemented first, and remains the default (`research.mode: worc`). This record adds a second provider behind the same seam.
+- **Replacing the worc-side triage path** — tracker-connector phase 07 stays and keeps working; it landed on 2026-09-11 (`ca9db3b`), and this record adds a second producer beside it rather than in place of it. Neither producer is the default: `research.mode: off` is, in both records (FR-R1).
 - **The report's content and the four verdicts** — defined by phase 07 and reused unchanged (FR-R10). If the local runs show the report needs a different shape, that is a change to phase 07's contract, made in that folder, for both providers at once.
 - **A sandbox, a container, a permission profile or a diff gate for the research agent** — explicitly excluded by the operator (D12). The agent runs with the operator's own CLI permissions.
 - **The agent writing code, a branch, a commit or a pull request** — the research deliverable is a report. The worktree is disposable and the clone cannot push (FR-R13). Implementation stays worc's job, which is the whole reason the connector hands it a task.

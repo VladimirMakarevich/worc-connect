@@ -23,6 +23,7 @@ These documents are design detail, not an implementation contract, and must not 
 | 7 | [definition-of-done.md](definition-of-done.md) | When the task is truly finished | ☑ |
 | 8 | [questions.md](questions.md) | Open questions (living) | ☑ |
 | — | [plan/README.md](plan/README.md) | Phased implementation plan (worc-side phases first, then the connector) | ☑ |
+| — | [review.md](review.md) | Deep review of the implemented connector (2026-09-12): findings, evidence, suggested order of work | — |
 
 ## How this task is being worked
 

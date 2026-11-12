@@ -42,7 +42,9 @@ worc-connect init --repo OWNER/REPO
 
 `init` is entirely offline: it writes `.worc-connect/config.yaml`, appends `.worc-connect/` to the clone's `.gitignore`, and makes no tracker call at all. It refuses to overwrite a configuration that already exists — delete it yourself if that is what you meant.
 
-**Check:** `.worc-connect/config.yaml` exists and `git status` shows the connector's home is ignored.
+**Commit that `.gitignore` line before the first task runs.** worc works in this same clone, so an uncommitted edit is part of the working tree its agent changes: the first task either carries the line into its pull request or — as worc's own review does — reverts it as unrelated, which leaves the connector's home (its cache holds issue text) unignored and one `git add` away from a commit.
+
+**Check:** `.worc-connect/config.yaml` exists, `git status` shows the connector's home is ignored, and `.gitignore` is not listed as modified.
 
 ## Step 3 — decide who may trigger a run
 

@@ -74,6 +74,8 @@ That build **has** every surface the connector wants: `references` is in `ALLOWE
 
 **Suggested shape of the fix.** Two parts. Correct the constant to the version that actually ships the contract (and the three places the documentation repeats it: [README.md](../../../README.md), [docs/configuration.md](../../configuration.md), and this folder). Then add the assertion that would have caught it: when `requires_worc_references` holds, `supports_contract(importlib.metadata.version("wastech-orchestrator"))` must be true. That test ties the version gate to the same installed worc the gate tests use, so the two can never drift again.
 
+**Resolution (2026-11-12).** The constant was right and the pin was wrong. worc tags its releases on its `release` branch, and the contract shipped in `v0.14.0a1` (`references:` is absent from `v0.13.0a1` and present from `v0.14.0a1` on). A build from `dev` reports the last tag reachable from `dev`, `0.10.3a2.devN`, however much of the contract it carries — so `MINIMUM_VERSION = "0.14.0a1"` stays, and `requirements-worc.txt` now pins the release tag `v0.16.0a1` instead of the `dev` branch, which reports its own number. The assertion suggested above is `test_the_worc_whose_rules_the_suite_uses_is_one_the_handshake_accepts` in `tests/test_worc_gate.py`; it failed against the `dev` build and passes against the tag. The first real run (see [definition-of-done.md](definition-of-done.md)) used worc `0.16.0a1` and its task file carried `references: ['Fixes #24']`.
+
 ## F3 — a `needs-info` verdict re-triggers itself
 
 **Severity: High. Reproduced.**

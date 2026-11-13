@@ -495,6 +495,9 @@ class StubAdapter:
     # Raised, one per call, by the next reads of a single item — a tracker that lists fine and then
     # throttles the read right after a write is the case the loop has to survive.
     fetch_failures: list[Exception] = field(default_factory=list)
+    # Raised, one per call, by the next comments: a tracker that took the label and then failed
+    # the comment right after it.
+    comment_failures: list[Exception] = field(default_factory=list)
     pull_request: PullRequest | None = None
     pull_requests: dict[int, PullRequest] = field(default_factory=dict)
     labels_prefix: str = "worc:"
@@ -567,6 +570,8 @@ class StubAdapter:
         self._touch(identifier, state=state)
 
     def comment(self, identifier: str, body_path: Path) -> None:
+        if self.comment_failures:
+            raise self.comment_failures.pop(0)
         self.comments.append((identifier, body_path.read_text(encoding="utf-8")))
         self._touch(identifier)
 

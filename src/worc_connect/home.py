@@ -42,7 +42,6 @@ TRIAGE_DIRNAME: Final = "triage"
 
 GITIGNORE_FILENAME: Final = ".gitignore"
 GITIGNORE_COMMENT: Final = "# worc-connect runtime home (auto-appended by `worc-connect init`)"
-GITIGNORE_LINE: Final = f"{HOME_DIRNAME}/"
 
 
 @dataclass(frozen=True)
@@ -174,30 +173,31 @@ research:
 
 
 def gitignore_line(home: ConnectorHome) -> str:
-    """The ``.gitignore`` line ``init`` writes for ``home``: its directory name, as a directory.
+    """The ``.gitignore`` line ``init`` writes for ``home`` into the ``.gitignore`` beside it.
 
-    Unanchored on purpose for the default name — ``.worc-connect/`` is the line operators already
-    have, and a second spelling of it would be noise. A home under another name gets its own name,
-    because a line for the default would leave the directory actually in use trackable.
+    ``.worc-connect/`` for the default name, unanchored, because that is the line operators already
+    have and a second spelling of it would be noise. A home under any other name gets an anchored
+    ``/<name>/``: a bare ``build/`` would ignore every ``build`` directory in the repository, not
+    just the one the connector lives in.
     """
-    return f"{home.path.name}/"
+    name = home.path.name
+    return f"{name}/" if name == HOME_DIRNAME else f"/{name}/"
 
 
 def ensure_gitignore_entry(home: ConnectorHome) -> bool:
-    """Append ``home`` to its clone's ``.gitignore``; True when a line was added.
+    """Append ``home`` to the ``.gitignore`` beside it; True when a line was added.
 
-    Idempotent through a textual probe of the file's own lines: the connector never runs ``git``, so
-    ``git check-ignore`` is not available to it, and re-appending a line the operator already wrote
-    would be noise in a file they own. A pattern an operator has expressed differently (a broader
-    glob, say) therefore still gets this line — visible, and one deletion away from undone.
+    Nothing is appended when the probe ``watch`` runs already finds the home ignored, whatever
+    exact spelling the operator chose: a redundant block in a tracked file is an uncommitted edit,
+    which is precisely what a worc agent reverts. A pattern the probe cannot read (a broader glob,
+    say) therefore still gets this line — visible, and one deletion away from undone.
     """
-    path = home.clone_path / GITIGNORE_FILENAME
-    line = gitignore_line(home)
-    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-    if line in {entry.strip() for entry in existing.splitlines()}:
+    if unignored_home(home, home.clone_path) is None:
         return False
-    separator = "" if existing == "" or existing.endswith("\n") else "\n"
-    block = f"{separator}{GITIGNORE_COMMENT}\n{line}\n"
+    path = home.clone_path / GITIGNORE_FILENAME
+    existing = _read_lines(path) or []
+    separator = "\n" if existing and not path.read_bytes().endswith(b"\n") else ""
+    block = f"{separator}{GITIGNORE_COMMENT}\n{gitignore_line(home)}\n"
     with path.open("a", encoding="utf-8", newline="") as handle:
         handle.write(block)
     return True
@@ -211,35 +211,60 @@ def unignored_home(home: ConnectorHome, clone_path: Path) -> str | None:
     "unrelated" changes included, can revert. The watch loop therefore asks this before every tick
     and refuses to run while the answer is not ``None``.
 
-    Textual, like the probe ``init`` uses, because the connector never runs ``git``. Only the
-    clone's root ``.gitignore`` is read, and only the spellings that name this directory exactly
+    Textual, because the connector never runs ``git``. The ``.gitignore`` files from the clone's
+    root down to the directory holding the home are read in git's order of precedence, each
+    against the home's path relative to it, and only the spellings that name the home exactly
     count — the path, anchored or not, and the bare directory name or ``**/name`` — with a later
-    ``!`` negation of the same spelling undoing it. A broader glob, a nested ``.gitignore``,
-    ``.git/info/exclude`` and a global excludes file do not count: the last two live in git's own
-    files, which the connector does not open, and an answer this probe cannot give is
-    the fail-closed one. A home outside the clone needs no line at all.
+    ``!`` negation of the same spelling undoing it. Lines are trimmed of trailing whitespace only,
+    as git trims them, and a byte-order mark is skipped, as git skips it. A broader glob, an
+    ignored parent directory, ``.git/info/exclude`` and a global excludes file do not count: the
+    last two live in git's own files, which the connector does not open. Anything this probe cannot
+    tell — a file it cannot read or decode included — is the fail-closed answer. A home outside
+    the clone needs no line at all.
     """
+    clone = clone_path.resolve()
+    target = home.path.resolve()
     try:
-        relative = home.path.resolve().relative_to(clone_path.resolve()).as_posix()
+        relative = target.relative_to(clone).as_posix()
     except ValueError:
         return None
-    path = clone_path / GITIGNORE_FILENAME
-    lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
-    spellings = _spellings(relative)
+    if relative == ".":
+        return "the connector's home is the clone itself — give it a directory of its own"
     ignored = False
-    for raw in lines:
-        entry = raw.strip()
-        if entry in spellings:
-            ignored = True
-        elif entry.startswith("!") and entry[1:] in spellings:
-            ignored = False
+    parts = target.relative_to(clone).parts
+    # Root first, deepest last: a nested file's lines take precedence, as they do in git.
+    for directory in [clone.joinpath(*parts[:depth]) for depth in range(len(parts))]:
+        lines = _read_lines(directory / GITIGNORE_FILENAME)
+        if lines is None:
+            return (
+                f"{(directory / GITIGNORE_FILENAME).as_posix()} cannot be read as UTF-8 text, so "
+                "whether the connector's home is ignored cannot be told — fix the file"
+            )
+        spellings = _spellings(target.relative_to(directory).as_posix())
+        for raw in lines:
+            entry = raw.rstrip()
+            if entry in spellings:
+                ignored = True
+            elif entry.startswith("!") and entry[1:] in spellings:
+                ignored = False
     if ignored:
         return None
+    gitignore = home.clone_path / GITIGNORE_FILENAME
     return (
-        f"the connector's home `{relative}/` is not ignored by "
-        f"{path.as_posix()} — it caches issue text and must never reach a commit; add the line "
-        f"`{relative}/` to that file and commit it"
+        f"the connector's home `{relative}/` is not ignored by the clone's .gitignore files — it "
+        f"caches issue text and must never reach a commit; add the line `{gitignore_line(home)}` "
+        f"to {gitignore.as_posix()} and commit it"
     )
+
+
+def _read_lines(path: Path) -> list[str] | None:
+    """A ``.gitignore``'s lines, BOM skipped: ``[]`` when there is none, ``None`` if unreadable."""
+    if not path.is_file():
+        return []
+    try:
+        return path.read_text(encoding="utf-8-sig").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def _spellings(relative: str) -> frozenset[str]:

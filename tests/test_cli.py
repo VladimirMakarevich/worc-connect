@@ -50,7 +50,22 @@ def test_init_gives_a_home_under_another_name_its_own_line(clone: Path) -> None:
 
     assert main(["init", "--home", str(clone / "connector"), "--repo", "OWNER/REPO"]) == 0
 
-    assert (clone / ".gitignore").read_text(encoding="utf-8").splitlines()[-1] == "connector/"
+    assert (clone / ".gitignore").read_text(encoding="utf-8").splitlines()[-1] == "/connector/"
+
+
+@pytest.mark.parametrize("name", [".", ".."])
+def test_init_refuses_a_home_that_is_no_directory_of_its_own(
+    clone: Path, name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `--home .` would make the clone the home, and its `.gitignore` line `/`.
+    (clone / "sub").mkdir()
+    monkeypatch.chdir(clone / "sub")
+    before = (clone / ".gitignore").read_text(encoding="utf-8")
+
+    code = main(["init", "--home", name, "--repo", "OWNER/REPO"])
+
+    assert code == 2
+    assert (clone / ".gitignore").read_text(encoding="utf-8") == before
 
 
 @pytest.mark.slow

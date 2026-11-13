@@ -226,6 +226,25 @@ def test_a_triage_that_finished_unseen_still_names_the_implementation_task(
     assert queued[1] == "Queued as worc implementation task `gh-142.2`.\n"
 
 
+def test_an_announcement_a_failed_comment_lost_is_posted_on_the_next_tick(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    adapter = StubAdapter(items=[work_item()])
+    loop = triaged(
+        home, store, fake_worc, adapter=adapter, report=report_text(Verdict.ACTIONABLE, reason="go")
+    )
+    adapter.comment_failures.append(TrackerRateLimited("slow down"))
+
+    with pytest.raises(TrackerRateLimited):
+        loop.tick(dry_run=False)
+    assert live_row(store).queued_announced is False
+    loop.tick(dry_run=False)
+
+    queued = [body for _, body in adapter.comments if body.startswith("Queued as")]
+    assert queued[-1] == "Queued as worc implementation task `gh-142.2`.\n"
+    assert live_row(store).queued_announced is True
+
+
 def test_a_rebuilt_queued_row_announces_nothing(
     home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
 ) -> None:

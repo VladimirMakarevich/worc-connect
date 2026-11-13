@@ -143,6 +143,11 @@ def _cmd_init(args: argparse.Namespace) -> int:
         print("worc-connect: --repo must name one repository as OWNER/REPO", file=sys.stderr)
         return _EXIT_USAGE
     home = _home(args)
+    if home.path.name in {"", ".", ".."}:
+        # `--home .` or `--home ..` names no directory of its own: the home would be the clone, or
+        # its parent, and the only `.gitignore` line that could cover it would ignore everything.
+        print("worc-connect: --home must name a directory of its own", file=sys.stderr)
+        return _EXIT_USAGE
     if home.config_path.exists():
         print(
             f"worc-connect: {home.config_path.as_posix()} already exists; edit it instead",

@@ -547,4 +547,5 @@ def test_a_followed_task_costs_one_log_line_per_tick(
 
     lines = [line for line in caplog.text.splitlines() if "item=142" in line]
     assert len(lines) == 1
-    assert "action=follow result=running worc=parked" in lines[0]
+    # worc's status whole, so a parked or paused task is told apart from one that runs.
+    assert 'action=follow result=running worc="parked (no daemon)"' in lines[0]

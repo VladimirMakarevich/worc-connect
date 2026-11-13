@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import cached_property
 from typing import Final
@@ -44,7 +44,7 @@ from worc_connect.core.state import (
     read_watermark,
     write_watermark,
 )
-from worc_connect.core.worc_cli import WorcCommand, WorcUnavailable, status_token
+from worc_connect.core.worc_cli import WorcCommand, WorcUnavailable
 from worc_connect.core.writeback import PHASE_STATES, Published, WriteBack
 from worc_connect.home import ConnectorHome, unignored_home
 from worc_connect.trackers.base import TrackerAdapter, TrackerError
@@ -393,12 +393,12 @@ class Watcher:
         """
         reconciler, write_back = work
         moved = reconciler.advance(row, item, now=now)
-        # A task entered the queue this tick: a row that was not queued before, or a row of its own
-        # the reconcile created — the implementation task an actionable triage report produced.
-        newly_queued = moved.phase is Phase.QUEUED and (
-            moved.seq != row.seq or row.phase is not Phase.QUEUED
-        )
-        published = write_back.publish(moved, item, newly_queued=newly_queued)
+        published = write_back.publish(moved, item)
+        if moved.phase is Phase.QUEUED and not moved.queued_announced:
+            # Recorded only once the publish returned: a comment a failed tracker call lost is
+            # posted on the next tick rather than forgotten.
+            moved = replace(moved, queued_announced=True)
+            self.store.save(moved)
         if published is Published.CLOSED:
             moved = self._retrigger.closed(moved, now=now)
         elif published is Published.SHOWN and moved.phase is Phase.NEEDS_INFO:
@@ -482,11 +482,11 @@ def _log(
 ) -> None:
     """One line per item per tick, carrying only identifiers — never a title, a body or an author.
 
-    A followed item's line also names worc's own status for its task, by its leading token: the
-    phase alone hides that ``running`` may mean worc is parked with no daemon, and saying so on a
-    second line is what used to double every followed item's share of the log.
+    A followed item's line also carries worc's own status for its task, whole and quoted: the
+    phase alone hides that ``running`` may mean ``parked (no daemon)`` or ``running (paused …)``,
+    and saying so on a second line is what used to double every followed item's share of the log.
     """
-    suffix = "" if worc is None else f" worc={status_token(worc)}"
+    suffix = "" if worc is None else f' worc="{" ".join(worc.split())}"'
     logger.info(
         "item=%s task=%s action=%s result=%s%s",
         item.identifier,

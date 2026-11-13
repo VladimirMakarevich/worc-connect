@@ -8,13 +8,14 @@ the item itself, not from the connector's cache, so a hand edit is adopted rathe
 restarted connector with no database at all still writes nothing it has already written.
 
 **A comment is what a state change sounds like.** Comments are posted when the state actually
-changes — and once more when a new task enters the queue of an item already labelled ``queued``,
-which is how the implementation task a fast triage produced still gets named. That keeps them
-idempotent for free: a quiet tick posts nothing, a rebuilt row posts
-nothing, and the same failure is never reported twice. Every body is a template this package wrote,
-carrying a task id, a status name and URLs — never the item's own text, never a log line, never a
-diff, and never anything read out of worc's home. Bodies travel as files; the closing message is
-the one exception the tracker's own command shape forces, and it is a template too.
+changes, with one exception keyed on the task rather than the label: each task is announced as
+queued exactly once, even on an item already labelled ``queued`` — which is how the implementation
+task a fast triage produced still gets named. That keeps them idempotent: a quiet tick posts
+nothing, a rebuilt row posts nothing, and the same failure is never reported twice. Every body is a
+template this package wrote, carrying a task id, a status name and URLs — never the item's own text,
+never a log line, never a diff, and never anything read out of worc's home. Bodies travel as files;
+the closing message is the one exception the tracker's own command shape forces, and it is a
+template too.
 
 **One kind of body carries text this package did not write**: the reason a triage verdict gives,
 which is prose the triage agent produced. It is published unchanged because the person who has to
@@ -115,7 +116,7 @@ class WriteBack:
         )
         self._labels_ensured = True
 
-    def publish(self, row: ItemRow, item: WorkItem, *, newly_queued: bool = False) -> Published:
+    def publish(self, row: ItemRow, item: WorkItem) -> Published:
         """Show ``row``'s phase on the item; returns what doing so took.
 
         ``NOTHING`` when the item already shows the state — a quiet tick, a rebuilt row — and
@@ -123,23 +124,24 @@ class WriteBack:
         leaves the tracker's open listing, so only somebody reopening it — or re-applying the label
         — brings it back as a new request.
 
-        ``newly_queued`` says the row's task entered worc's queue this tick. It matters only where
-        the item already shows ``queued``: a triage task that finished before any tick saw it run
-        leaves that label in place, and the implementation task its report produced would
-        otherwise be queued without a word — the label is right, but nobody was told which task
-        now carries the item.
+        The queued comment follows the row rather than the label: it is posted once per task, while
+        ``row.queued_announced`` is unset — including on an item already labelled ``queued``, where
+        a triage task that finished before any tick saw it run leaves the implementation task its
+        report produced — and never again for the same task, whatever its label does afterwards.
+        The caller records the announcement once this returns.
         """
         desired = PHASE_STATES.get(row.phase)
         if desired is None:
             return Published.NOTHING
+        announce = desired is ItemState.QUEUED and not row.queued_announced
         current = self.adapter.current_state(item)
         if current is desired:
-            if newly_queued and desired is ItemState.QUEUED:
-                return self._comment(row, item, desired)
-            return Published.NOTHING
+            return self._comment(row, item, desired) if announce else Published.NOTHING
         self.ensure_labels()
         self.adapter.set_state(item.identifier, desired, previous=current)
         _log(row, "state", str(desired))
+        if desired is ItemState.QUEUED and not announce:
+            return Published.SHOWN
         return self._announce(row, item, desired)
 
     def _announce(self, row: ItemRow, item: WorkItem, state: ItemState) -> Published:

@@ -48,7 +48,7 @@ worc-connect status
 
 Prints the repository and home it is using, the poll watermark, how the last tick ended, and one line per item it has taken on — identifiers, phase, task id, branch and pull request, and nothing an item wrote. It opens the database read-only, so it cannot create or change anything.
 
-`.worc-connect/connect.log` is the running account: one line per action, `item=… task=… action=… result=…`. A followed item gets one line per tick, `action=follow result=<phase>`, with worc's own status for the task as `worc=<status>` when it has one — `result=running worc=parked` means worc holds the task but no daemon is running it. It carries ids and URLs only — never issue text, never a diff, never anything read out of worc's home. It rotates at 5 MB with three older files kept, so a daemon on a busy repository never grows it without end.
+`.worc-connect/connect.log` is the running account: one line per action, `item=… task=… action=… result=…`. A followed item gets one line per tick, `action=follow result=<phase>`, with worc's own status for the task, whole and quoted, as `worc="…"` when it has one — `result=running worc="parked (no daemon)"` means worc holds the task but no daemon is running it, and `worc="running (paused …)"` that it is paused. It carries ids and URLs only — never issue text, never a diff, never anything read out of worc's home. It rotates at 5 MB with three older files kept, so a daemon on a busy repository never grows it without end.
 
 Lines worth recognising:
 
@@ -101,7 +101,7 @@ If the run needs to start over from the issue instead, take the trigger label of
 ## Housekeeping
 
 - **`state.db` is disposable.** Delete it whenever you like; the next tick rebuilds every row from the tracker, `worc list` and the lifecycle folders.
-- **The home is gitignored** by `init`, and `watch` refuses to tick while the clone's root `.gitignore` does not name it — the cache holds issue text. A home outside the clone needs no line; one under another name or in a subdirectory needs a line naming it.
+- **The home is gitignored** by `init`, and `watch` refuses to tick while no `.gitignore` from the clone's root down to the home's directory names it — the cache holds issue text. A home outside the clone needs no line; for one under another name `init` writes an anchored `/<name>/` beside it.
 - **Nothing here needs a credential.** The connector stores no token; `gh auth status` is the whole of its authentication story. Rotating your `gh` login needs no change on this side.
 - **Cost.** A tick with nothing new makes no model call and writes nothing. What costs money is worc running the tasks you gated — one agent run per gated item, and two with the [triage step](triage.md) on.
 

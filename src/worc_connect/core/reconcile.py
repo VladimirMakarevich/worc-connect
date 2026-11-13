@@ -153,6 +153,8 @@ class Reconciler:
             research_task_id=(
                 None if stage is Stage.RESEARCH else self._triage_before(item.identifier, seq)
             ),
+            # The item already shows a state, so its task was announced by the run that set it.
+            queued_announced=True,
         )
         if persist:
             self.store.save(rebuilt)

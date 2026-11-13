@@ -25,7 +25,7 @@ Three properties fall out of that picture and explain most of the behaviour:
 
 ## One tick, step by step
 
-Every tick — a single `watch --once`, or one iteration of the loop — first checks that the clone's root `.gitignore` still names the connector's home, and refuses before any tracker call if it does not (the cache holds issue text; see [troubleshooting](troubleshooting.md#it-refuses-to-start)). Then it does the same seven things:
+Every tick — a single `watch --once`, or one iteration of the loop — first checks that the clone's `.gitignore` still names the connector's home, and refuses before any tracker call if it does not (the cache holds issue text; see [troubleshooting](troubleshooting.md#it-refuses-to-start)). Then it does the same seven things:
 
 1. **List.** Ask the tracker for the repository's open items updated at or after the watermark. On the first tick there is no watermark, so it is every open item.
 2. **Follow what is in flight.** The listing answers "what changed", and an item whose task is running is exactly an item nothing is changing. So every row still in flight is also read by its identifier, whether or not the listing mentioned it. A busy repository cannot push a running task out of sight.

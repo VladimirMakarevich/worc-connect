@@ -8,7 +8,9 @@ the item itself, not from the connector's cache, so a hand edit is adopted rathe
 restarted connector with no database at all still writes nothing it has already written.
 
 **A comment is what a state change sounds like.** Comments are posted when the state actually
-changes, which makes them idempotent for free: a quiet tick posts nothing, a rebuilt row posts
+changes — and once more when a new task enters the queue of an item already labelled ``queued``,
+which is how the implementation task a fast triage produced still gets named. That keeps them
+idempotent for free: a quiet tick posts nothing, a rebuilt row posts
 nothing, and the same failure is never reported twice. Every body is a template this package wrote,
 carrying a task id, a status name and URLs — never the item's own text, never a log line, never a
 diff, and never anything read out of worc's home. Bodies travel as files; the closing message is
@@ -113,19 +115,27 @@ class WriteBack:
         )
         self._labels_ensured = True
 
-    def publish(self, row: ItemRow, item: WorkItem) -> Published:
+    def publish(self, row: ItemRow, item: WorkItem, *, newly_queued: bool = False) -> Published:
         """Show ``row``'s phase on the item; returns what doing so took.
 
         ``NOTHING`` when the item already shows the state — a quiet tick, a rebuilt row — and
         ``CLOSED`` when showing it closed the item, which the caller needs because a closed item
         leaves the tracker's open listing, so only somebody reopening it — or re-applying the label
         — brings it back as a new request.
+
+        ``newly_queued`` says the row's task entered worc's queue this tick. It matters only where
+        the item already shows ``queued``: a triage task that finished before any tick saw it run
+        leaves that label in place, and the implementation task its report produced would
+        otherwise be queued without a word — the label is right, but nobody was told which task
+        now carries the item.
         """
         desired = PHASE_STATES.get(row.phase)
         if desired is None:
             return Published.NOTHING
         current = self.adapter.current_state(item)
         if current is desired:
+            if newly_queued and desired is ItemState.QUEUED:
+                return self._comment(row, item, desired)
             return Published.NOTHING
         self.ensure_labels()
         self.adapter.set_state(item.identifier, desired, previous=current)
@@ -143,6 +153,10 @@ class WriteBack:
             self.adapter.close(item.identifier, _closing_message(row))
             _log(row, "close", "merged")
             return Published.CLOSED
+        return self._comment(row, item, state)
+
+    def _comment(self, row: ItemRow, item: WorkItem, state: ItemState) -> Published:
+        """Post the comment a move into ``state`` deserves, if any and if comments are on."""
         body = _comment_body(row, state)
         if body is None or not self.config.write_back.comment:
             return Published.SHOWN

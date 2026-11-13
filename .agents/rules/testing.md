@@ -38,7 +38,7 @@ Use **fake executables** — a fake `gh` (JSON fixtures per subcommand, recorded
 - a finished triage task whose file worc left in `tasks/pending/` (a worc defect for flows that publish nothing) is followed by the listing's `done`, across a deleted cache, and never re-run;
 - worc's `done` is matched on its leading token wherever it is read, the pull-request discovery included;
 - dry run: stdout names the plan, no file, no state row, no `gh` side-effect verb recorded;
-- the three comment kinds and their contents, the queued comment naming its stage (triage or implementation); close on merge on and off; the rebuild of rows from labels plus `worc list` after the database is deleted;
+- the three comment kinds and their contents, the queued comment naming its stage (triage or implementation), posted for the implementation task even when the item already showed `queued` because no tick saw the triage task run, and never again on a quiet tick or a rebuilt row; close on merge on and off; the rebuild of rows from labels plus `worc list` after the database is deleted;
 - the owner's edits to a published PR (more commits, a new title, a squash merge, a deleted branch) and a PR closed then reopened: every PR-derived state is recomputed by number;
 - a gate reject seen from outside `.worc/`: the file is gone from `pending/` and `worc list --all` has no row — or a `rejected` entry, whose `validation_reason` and nothing else from the entry reaches the comment;
 - both sides of the version handshake: a worc that reports the documented minimum emits the adapter's closing line as `references:`, and a worc below it (or one that cannot be asked at all) emits no such key and produces the file an older worc already accepts;

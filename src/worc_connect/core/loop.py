@@ -393,7 +393,12 @@ class Watcher:
         """
         reconciler, write_back = work
         moved = reconciler.advance(row, item, now=now)
-        published = write_back.publish(moved, item)
+        # A task entered the queue this tick: a row that was not queued before, or a row of its own
+        # the reconcile created — the implementation task an actionable triage report produced.
+        newly_queued = moved.phase is Phase.QUEUED and (
+            moved.seq != row.seq or row.phase is not Phase.QUEUED
+        )
+        published = write_back.publish(moved, item, newly_queued=newly_queued)
         if published is Published.CLOSED:
             moved = self._retrigger.closed(moved, now=now)
         elif published is Published.SHOWN and moved.phase is Phase.NEEDS_INFO:

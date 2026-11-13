@@ -33,7 +33,7 @@ Every tick — a single `watch --once`, or one iteration of the loop — first c
 4. **Build and stage.** For an admitted item: allocate the id (`gh-142`) and the branch, render the task file, and write it atomically into `<tasks_dir>/preparing/`.
 5. **Promote.** Run `worc promote <task-id>`. That is worc's own atomic, refuse-to-overwrite ingress; from here the task is worc's.
 6. **Reconcile.** For every row that already exists, re-derive its phase from the three sources that actually know: the lifecycle folders on disk, `worc list --format json --all`, and — once there is one — the pull request itself, read by number and recomputed from its live state.
-7. **Write back.** Publish the state the row now implies: one label (the previous one removed), a comment when the state actually changed, and the close when the pull request merged. Then advance the watermark.
+7. **Write back.** Publish the state the row now implies: one label (the previous one removed), a comment when the state actually changed — or when a new task was queued on an item already labelled `worc:queued`, as the implementation task of a triage nobody saw running is — and the close when the pull request merged. Then advance the watermark.
 
 A tick with nothing new writes nothing at all. A tick in which the tracker is unreachable, throttled or refusing the login is logged, changes no state, and **the next tick is the retry** — no partial state, no backoff to configure.
 

@@ -206,6 +206,43 @@ def test_the_two_queued_comments_name_their_stage(
     assert all("do it" not in body for body in queued)  # nothing of the report is quoted
 
 
+def test_a_triage_that_finished_unseen_still_names_the_implementation_task(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    # No tick saw the triage task run, so the item still shows `queued` when the implementation task
+    # is queued: the label does not change, and the comment naming the new task is still posted.
+    adapter = StubAdapter(items=[work_item()])
+    loop = triaged(
+        home, store, fake_worc, adapter=adapter, report=report_text(Verdict.ACTIONABLE, reason="go")
+    )
+
+    loop.tick(dry_run=False)
+    loop.tick(dry_run=False)  # a quiet tick afterwards repeats nothing
+
+    assert [state for _, state, _ in adapter.states] == ["queued"]
+    queued = [body for _, body in adapter.comments if body.startswith("Queued as")]
+    assert len(queued) == 2
+    assert queued[0].startswith("Queued as worc triage task `gh-142`")
+    assert queued[1] == "Queued as worc implementation task `gh-142.2`.\n"
+
+
+def test_a_rebuilt_queued_row_announces_nothing(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    adapter = StubAdapter(items=[work_item()])
+    loop = triaged(
+        home, store, fake_worc, adapter=adapter, report=report_text(Verdict.ACTIONABLE, reason="go")
+    )
+    loop.tick(dry_run=False)
+    comments = len(adapter.comments)
+
+    rebuilt_store = fresh_store(home, store)
+    watcher(home, adapter, rebuilt_store).tick(dry_run=False)
+
+    assert len(adapter.comments) == comments
+    rebuilt_store.close()
+
+
 def test_a_needs_info_report_asks_the_reporter_and_queues_nothing(
     home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
 ) -> None:

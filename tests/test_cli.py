@@ -41,6 +41,46 @@ def test_init_writes_a_configuration_and_keeps_the_home_out_of_git(
     assert ".worc-connect/" in gitignore.splitlines()
     out = capsys.readouterr().out
     assert "watch --once --dry-run" in out
+    # Said in so many words: an uncommitted line is what a worc task reverted in the first real run.
+    assert f"commit {home.clone_path.as_posix()}/.gitignore before the first" in out
+
+
+def test_init_gives_a_home_under_another_name_its_own_line(clone: Path) -> None:
+    (clone / ".gitignore").unlink()
+
+    assert main(["init", "--home", str(clone / "connector"), "--repo", "OWNER/REPO"]) == 0
+
+    assert (clone / ".gitignore").read_text(encoding="utf-8").splitlines()[-1] == "/connector/"
+
+
+@pytest.mark.parametrize("name", [".", ".."])
+def test_init_refuses_a_home_that_is_no_directory_of_its_own(
+    clone: Path, name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `--home .` would make the clone the home, and its `.gitignore` line `/`.
+    (clone / "sub").mkdir()
+    monkeypatch.chdir(clone / "sub")
+    before = (clone / ".gitignore").read_text(encoding="utf-8")
+
+    code = main(["init", "--home", name, "--repo", "OWNER/REPO"])
+
+    assert code == 2
+    assert (clone / ".gitignore").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.slow
+@requires_installed_distribution
+def test_watch_refuses_while_the_clone_does_not_ignore_the_home(
+    home: ConnectorHome, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_config(home, base_config())
+    (home.clone_path / ".gitignore").write_text("build/\n", encoding="utf-8", newline="")
+
+    code = main(["watch", "--home", str(home.path), "--once"])
+
+    assert code == 1
+    assert "is not ignored by" in capsys.readouterr().err
+    assert fake_gh.calls == []
 
 
 def test_init_uses_the_home_in_the_current_directory_by_default(
@@ -138,7 +178,10 @@ def test_a_dry_run_prints_the_plan_and_writes_nothing(
     code = main(["watch", "--home", str(home.path), "--once", "--dry-run"])
 
     assert code == 0
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    out = captured.out
+    # The plan is the dry run's whole output: the per-item INFO lines would repeat it on stderr.
+    assert " INFO " not in captured.err
     assert "dry run: nothing is written" in out
     assert "item=142 action=stage-task" in out
     assert "item=143 action=stage-task" in out

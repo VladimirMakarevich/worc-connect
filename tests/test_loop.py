@@ -22,7 +22,8 @@ import pytest
 
 from support import FakeWorc, StubAdapter, connector_config, work_item
 from worc_connect.core.items import WorkItemState
-from worc_connect.core.loop import WATERMARK_OVERLAP, Action, TickReport, Watcher
+from worc_connect.core.loop import WATERMARK_OVERLAP, Watcher
+from worc_connect.core.plan import Action, TickReport
 from worc_connect.core.state import Phase, StateStore, read_watermark
 from worc_connect.core.worc_cli import WorcCommand
 from worc_connect.home import ConnectorHome
@@ -461,3 +462,90 @@ def test_a_dry_run_reads_but_never_creates_labels(home: ConnectorHome) -> None:
     assert adapter.ensured == []
     assert adapter.ensured_triggers == []
     read_only.close()
+
+
+# --- the home has to stay out of git -------------------------------------------------------------
+
+
+def test_a_home_the_clone_no_longer_ignores_stops_the_tick_before_the_tracker(
+    home: ConnectorHome, store: StateStore, clone: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The first real run: `init`'s line was uncommitted, a worc task reverted it as unrelated, and
+    # the connector went on caching issue text in a directory git would now commit.
+    (clone / ".gitignore").write_text("build/\n", encoding="utf-8", newline="")
+    adapter = StubAdapter(items=[work_item(updated_at=UPDATED)])
+
+    with caplog.at_level(logging.WARNING, logger="worc_connect.core.loop"):
+        code = watcher(home, adapter, store).run(once=True, dry_run=False)
+
+    assert code == 1
+    assert adapter.listed_since == []
+    assert adapter.ensured == []
+    assert store.rows() == []
+    assert store.meta("last_tick_result") == "skipped HomeNotIgnored"
+    assert "action=guard result=skipped-HomeNotIgnored" in caplog.text
+    assert "`.worc-connect/`" in caplog.text
+
+
+def test_a_dry_run_refuses_the_same_way_and_writes_nothing(
+    home: ConnectorHome, clone: Path
+) -> None:
+    (clone / ".gitignore").unlink()
+    adapter = StubAdapter(items=[work_item(updated_at=UPDATED)])
+    read_only = StateStore.read_only(home.state_path)
+
+    assert watcher(home, adapter, read_only).run(once=True, dry_run=True) == 1
+    assert adapter.listed_since == []
+    assert not home.state_path.exists()
+    read_only.close()
+
+
+def test_a_daemon_resumes_once_the_line_is_back(
+    home: ConnectorHome, store: StateStore, clone: Path
+) -> None:
+    gitignore = clone / ".gitignore"
+    gitignore.write_text("build/\n", encoding="utf-8", newline="")
+    adapter = StubAdapter(items=[work_item(updated_at=UPDATED)])
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 1:
+            gitignore.write_text("build/\n.worc-connect/\n", encoding="utf-8", newline="")
+        else:
+            home.stop_path.write_text("stop\n", encoding="utf-8")
+
+    loop = Watcher(
+        config=connector_config(home.clone_path, poll_interval_seconds=1),
+        adapter=adapter,
+        store=store,
+        home=home,
+        worc=WorcCommand(command="worc", repo_path=home.clone_path),
+        now_fn=lambda: NOW,
+        sleep_fn=sleep,
+    )
+
+    assert loop.run(once=False, dry_run=False) == 0
+    assert len(adapter.listed_since) == 1  # the refused tick asked the tracker nothing
+    assert [row.task_id for row in store.rows()] == ["gh-142"]
+
+
+def test_a_followed_task_costs_one_log_line_per_tick(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The first real runs logged `result=parked (no daemon)` from the reconcile and then
+    # `result=running` from the loop, for the same item, on every tick.
+    adapter = StubAdapter(items=[work_item(updated_at=UPDATED)])
+    loop = watcher(home, adapter, store)
+    loop.tick(dry_run=False)
+    fake_worc.entries(**{"gh-142": "parked (no daemon)"})
+
+    with caplog.at_level(logging.INFO, logger="worc_connect"):
+        loop.tick(dry_run=False)
+        caplog.clear()
+        loop.tick(dry_run=False)
+
+    lines = [line for line in caplog.text.splitlines() if "item=142" in line]
+    assert len(lines) == 1
+    # worc's status whole, so a parked or paused task is told apart from one that runs.
+    assert 'action=follow result=running worc="parked (no daemon)"' in lines[0]

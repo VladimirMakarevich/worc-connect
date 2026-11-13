@@ -25,7 +25,7 @@ Three properties fall out of that picture and explain most of the behaviour:
 
 ## One tick, step by step
 
-Every tick — a single `watch --once`, or one iteration of the loop — does the same seven things:
+Every tick — a single `watch --once`, or one iteration of the loop — first checks that the clone's `.gitignore` still names the connector's home, and refuses before any tracker call if it does not (the cache holds issue text; see [troubleshooting](troubleshooting.md#it-refuses-to-start)). Then it does the same seven things:
 
 1. **List.** Ask the tracker for the repository's open items updated at or after the watermark. On the first tick there is no watermark, so it is every open item.
 2. **Follow what is in flight.** The listing answers "what changed", and an item whose task is running is exactly an item nothing is changing. So every row still in flight is also read by its identifier, whether or not the listing mentioned it. A busy repository cannot push a running task out of sight.
@@ -33,7 +33,7 @@ Every tick — a single `watch --once`, or one iteration of the loop — does th
 4. **Build and stage.** For an admitted item: allocate the id (`gh-142`) and the branch, render the task file, and write it atomically into `<tasks_dir>/preparing/`.
 5. **Promote.** Run `worc promote <task-id>`. That is worc's own atomic, refuse-to-overwrite ingress; from here the task is worc's.
 6. **Reconcile.** For every row that already exists, re-derive its phase from the three sources that actually know: the lifecycle folders on disk, `worc list --format json --all`, and — once there is one — the pull request itself, read by number and recomputed from its live state.
-7. **Write back.** Publish the state the row now implies: one label (the previous one removed), a comment when the state actually changed, and the close when the pull request merged. Then advance the watermark.
+7. **Write back.** Publish the state the row now implies: one label (the previous one removed), a comment when the state actually changed — or when a new task was queued on an item already labelled `worc:queued`, as the implementation task of a triage nobody saw running is — and the close when the pull request merged. Then advance the watermark.
 
 A tick with nothing new writes nothing at all. A tick in which the tracker is unreachable, throttled or refusing the login is logged, changes no state, and **the next tick is the retry** — no partial state, no backoff to configure.
 
@@ -75,7 +75,7 @@ A follow-up on an item whose previous pull request is still open continues that 
 
 ## The files the connector owns
 
-Everything lives in `.worc-connect/`, a sibling of worc's `.worc/` and never inside it. `init` appends it to the clone's `.gitignore`.
+Everything lives in `.worc-connect/`, a sibling of worc's `.worc/` and never inside it. `init` appends it to the clone's `.gitignore` — commit that line — and `watch` refuses to tick while the line is missing.
 
 | Path | What it is | Safe to delete? |
 | --- | --- | --- |

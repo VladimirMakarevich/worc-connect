@@ -217,3 +217,17 @@ def test_the_branch_the_connector_names_is_the_one_worc_will_use(clone: Path) ->
     # could then not find the pull request by.
     assert len(draft.branch) <= BRANCH_NAME_MAX_LEN
     assert is_valid_branch_name(draft.branch)
+
+
+@requires_worc_references
+def test_the_worc_whose_rules_the_suite_uses_is_one_the_handshake_accepts() -> None:
+    # The suites above judge the connector's output against an installed worc that has the
+    # contract. If that same worc's version is one the handshake refuses, the connector never emits
+    # the contract against it — every test here passes while the product silently drops
+    # `references:`. A build of worc from a branch reports the last tag on that branch, not the
+    # release it carries, which is why `requirements-worc.txt` pins a tag; this keeps the two tied.
+    from importlib.metadata import version
+
+    from worc_connect.core.worc_version import supports_contract
+
+    assert supports_contract(f"wastech-orchestrator {version('wastech-orchestrator')}")

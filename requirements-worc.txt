@@ -14,9 +14,11 @@
 #
 # Without it, `tests/test_worc_gate.py` skips and the rest of the suite is unaffected.
 #
-# The branch is named: the contract this connector adopts — `references:`, `pr_url` and the
-# `rejected` section in the JSON listing, and `flow.report_dir` — is on worc's `dev` and not yet on
-# its default branch, and the suites that judge a generated task file and the shipped triage flow
-# must run against the real rules rather than against a copy of them. Drop the suffix once the
-# contract is worc's default; the two suites skip with a reason against a worc that predates it.
-wastech-orchestrator @ git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@dev
+# Pinned to a release tag, not to a branch. worc tags its releases on its `release` branch, so a
+# build from `dev` reports the last version reachable from `dev` (`0.10.3a2.devN`) even when it
+# carries the whole contract — and the connector's version handshake, which reads `worc --version`,
+# then refuses the contract it is being tested against. A tagged release reports its own number, so
+# the suites that judge a generated task file and the shipped triage flow run against a worc whose
+# version the connector also accepts; `tests/test_worc_gate.py` asserts the two agree. The tag must
+# be at least `MINIMUM_VERSION` in `src/worc_connect/core/worc_version.py`.
+wastech-orchestrator @ git+https://github.com/VladimirMakarevich/wastech-orchestrator.git@v0.16.0a1

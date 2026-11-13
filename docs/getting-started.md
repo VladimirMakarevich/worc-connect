@@ -42,7 +42,11 @@ worc-connect init --repo OWNER/REPO
 
 `init` is entirely offline: it writes `.worc-connect/config.yaml`, appends `.worc-connect/` to the clone's `.gitignore`, and makes no tracker call at all. It refuses to overwrite a configuration that already exists — delete it yourself if that is what you meant.
 
-**Check:** `.worc-connect/config.yaml` exists and `git status` shows the connector's home is ignored.
+**Commit that `.gitignore` line before the first `watch`** — `init` says so in its output. worc works in this same clone, so an uncommitted edit is part of the working tree its agent changes: the first task either carries the line into its pull request or — as worc's own review did in the first real run — reverts it as unrelated, which leaves the connector's home (its cache holds issue text) unignored and one `git add` away from a commit.
+
+`watch` checks this before every tick, dry run included: if no `.gitignore` from the clone's root down to the home's directory names the home exactly (`.worc-connect/`, `/.worc-connect/`, `**/.worc-connect/` and the like, without leading spaces — read as text, since the connector never runs `git`), the tick is refused with exit code `1` and `action=guard result=skipped-HomeNotIgnored`, and no tracker call is made. Put the line back and commit it; a running daemon resumes on its next tick. A line in `.git/info/exclude` or a global excludes file does not count — the connector does not read git's own files — so the line belongs in the tracked `.gitignore`.
+
+**Check:** `.worc-connect/config.yaml` exists, `git status` shows the connector's home is ignored, and `.gitignore` is not listed as modified.
 
 ## Step 3 — decide who may trigger a run
 
@@ -79,7 +83,7 @@ The remaining blocks decide what the generated task looks like and what appears 
 worc-connect watch --once --dry-run
 ```
 
-This is the safe first command, and it is safe in the strongest sense: it writes no task file, no state database, no log, and it makes no write call to the tracker. It reads, decides, and prints.
+This is the safe first command, and it is safe in the strongest sense: it writes no task file, no state database, no log, and it makes no write call to the tracker. It reads, decides, and prints. The plan goes to stdout; stderr carries only warnings and errors (a refused tick, an unreachable tracker) — the per-item log lines a real tick writes would only repeat the plan.
 
 You get one `plan:` line per item the tick saw:
 
@@ -113,7 +117,7 @@ Start `worc watch` in the clone if it is not already running — the connector q
 worc-connect watch --once
 ```
 
-That single pass does, for each gated item: allocate the task id and branch, write `tasks/preparing/gh-142.md`, run `worc promote gh-142`, put `worc:queued` on the issue and comment "Queued as worc task `gh-142`".
+That single pass does, for each gated item: allocate the task id and branch, write `tasks/preparing/gh-142.md`, run `worc promote gh-142`, put `worc:queued` on the issue and comment "Queued as worc implementation task `gh-142`." With the [triage step](triage.md) on, the first comment instead reads "Queued as worc triage task `gh-142`: …", and the implementation task that an actionable verdict produces is announced as `gh-142.2`.
 
 ```text
 tick: repo=OWNER/REPO tracker=github listed=3 followed=0 gated=1 following=0

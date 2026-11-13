@@ -185,6 +185,7 @@ class FakeGh:
     home: Path
     bin_dir: Path
     _responses: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _issues: list[dict[str, Any]] | None = None
 
     def respond(
         self,
@@ -217,10 +218,21 @@ class FakeGh:
         """The environment the last call was given."""
         return _recorded_environment(self.home)
 
+    def issues(self, *items: WorkItem) -> None:
+        """Make the fake a repository holding ``items``, filtered and changed the way GitHub does.
+
+        ``issue list`` / ``view`` / ``edit`` / ``comment`` / ``close`` are then answered from it
+        rather than from a scripted response, so a listing's search qualifiers actually decide
+        what comes back.
+        """
+        self._issues = [{**issue_payload(item), "state": item.state.name} for item in items]
+        self._flush()
+
     def _flush(self) -> None:
-        (self.home / "scenario.json").write_text(
-            json.dumps({"responses": self._responses}), encoding="utf-8", newline=""
-        )
+        scenario: dict[str, Any] = {"responses": self._responses}
+        if self._issues is not None:
+            scenario["issues"] = self._issues
+        (self.home / "scenario.json").write_text(json.dumps(scenario), encoding="utf-8", newline="")
 
 
 def _recorded_environment(home: Path) -> dict[str, str]:
@@ -483,6 +495,9 @@ class StubAdapter:
     # Raised, one per call, by the next reads of a single item — a tracker that lists fine and then
     # throttles the read right after a write is the case the loop has to survive.
     fetch_failures: list[Exception] = field(default_factory=list)
+    # Raised, one per call, by the next comments: a tracker that took the label and then failed
+    # the comment right after it.
+    comment_failures: list[Exception] = field(default_factory=list)
     pull_request: PullRequest | None = None
     pull_requests: dict[int, PullRequest] = field(default_factory=dict)
     labels_prefix: str = "worc:"
@@ -555,6 +570,8 @@ class StubAdapter:
         self._touch(identifier, state=state)
 
     def comment(self, identifier: str, body_path: Path) -> None:
+        if self.comment_failures:
+            raise self.comment_failures.pop(0)
         self.comments.append((identifier, body_path.read_text(encoding="utf-8")))
         self._touch(identifier)
 

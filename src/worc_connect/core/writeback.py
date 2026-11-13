@@ -8,11 +8,14 @@ the item itself, not from the connector's cache, so a hand edit is adopted rathe
 restarted connector with no database at all still writes nothing it has already written.
 
 **A comment is what a state change sounds like.** Comments are posted when the state actually
-changes, which makes them idempotent for free: a quiet tick posts nothing, a rebuilt row posts
-nothing, and the same failure is never reported twice. Every body is a template this package wrote,
-carrying a task id, a status name and URLs — never the item's own text, never a log line, never a
-diff, and never anything read out of worc's home. Bodies travel as files; the closing message is
-the one exception the tracker's own command shape forces, and it is a template too.
+changes, with one exception keyed on the task rather than the label: each task is announced as
+queued exactly once, even on an item already labelled ``queued`` — which is how the implementation
+task a fast triage produced still gets named. That keeps them idempotent: a quiet tick posts
+nothing, a rebuilt row posts nothing, and the same failure is never reported twice. Every body is a
+template this package wrote, carrying a task id, a status name and URLs — never the item's own text,
+never a log line, never a diff, and never anything read out of worc's home. Bodies travel as files;
+the closing message is the one exception the tracker's own command shape forces, and it is a
+template too.
 
 **One kind of body carries text this package did not write**: the reason a triage verdict gives,
 which is prose the triage agent produced. It is published unchanged because the person who has to
@@ -32,7 +35,7 @@ from typing import Final
 
 from worc_connect.config import ConnectorConfig
 from worc_connect.core.items import ItemState, WorkItem
-from worc_connect.core.state import ItemRow, Phase
+from worc_connect.core.state import ItemRow, Phase, Stage
 from worc_connect.trackers.base import TrackerAdapter
 
 logger = logging.getLogger(__name__)
@@ -120,16 +123,25 @@ class WriteBack:
         ``CLOSED`` when showing it closed the item, which the caller needs because a closed item
         leaves the tracker's open listing, so only somebody reopening it — or re-applying the label
         — brings it back as a new request.
+
+        The queued comment follows the row rather than the label: it is posted once per task, while
+        ``row.queued_announced`` is unset — including on an item already labelled ``queued``, where
+        a triage task that finished before any tick saw it run leaves the implementation task its
+        report produced — and never again for the same task, whatever its label does afterwards.
+        The caller records the announcement once this returns.
         """
         desired = PHASE_STATES.get(row.phase)
         if desired is None:
             return Published.NOTHING
+        announce = desired is ItemState.QUEUED and not row.queued_announced
         current = self.adapter.current_state(item)
         if current is desired:
-            return Published.NOTHING
+            return self._comment(row, item, desired) if announce else Published.NOTHING
         self.ensure_labels()
         self.adapter.set_state(item.identifier, desired, previous=current)
         _log(row, "state", str(desired))
+        if desired is ItemState.QUEUED and not announce:
+            return Published.SHOWN
         return self._announce(row, item, desired)
 
     def _announce(self, row: ItemRow, item: WorkItem, state: ItemState) -> Published:
@@ -143,6 +155,10 @@ class WriteBack:
             self.adapter.close(item.identifier, _closing_message(row))
             _log(row, "close", "merged")
             return Published.CLOSED
+        return self._comment(row, item, state)
+
+    def _comment(self, row: ItemRow, item: WorkItem, state: ItemState) -> Published:
+        """Post the comment a move into ``state`` deserves, if any and if comments are on."""
         body = _comment_body(row, state)
         if body is None or not self.config.write_back.comment:
             return Published.SHOWN
@@ -172,7 +188,7 @@ def _comment_body(row: ItemRow, state: ItemState) -> str | None:
     """
     task = row.task_id or "the task"
     if state is ItemState.QUEUED:
-        return f"Queued as worc task `{task}`.\n"
+        return _queued_body(row, task)
     if state is ItemState.PR_OPEN and row.pr_url:
         return f"worc task `{task}` opened a pull request: {row.pr_url}\n"
     if state is ItemState.FAILED:
@@ -189,6 +205,21 @@ def _comment_body(row: ItemRow, state: ItemState) -> str | None:
             f"{row.research_note or 'no reason was recorded'}\n"
         )
     return None
+
+
+def _queued_body(row: ItemRow, task: str) -> str:
+    """Which of the item's tasks was queued: the triage step's, or the implementation's.
+
+    With the analysis step on, one item is queued twice, and two identical "queued as" comments
+    read as a duplicate rather than as two stages. The stage is the connector's own knowledge of
+    the row, so naming it adds no text this package did not write.
+    """
+    if row.stage is Stage.RESEARCH:
+        return (
+            f"Queued as worc triage task `{task}`: it analyses this issue first, and what it "
+            "concludes decides whether an implementation task follows.\n"
+        )
+    return f"Queued as worc implementation task `{task}`.\n"
 
 
 def _failure_body(row: ItemRow, task: str) -> str:

@@ -26,7 +26,8 @@ from support import (
     work_item,
 )
 from worc_connect.core.items import PullRequestState
-from worc_connect.core.loop import Action, Watcher
+from worc_connect.core.loop import Watcher
+from worc_connect.core.plan import Action
 from worc_connect.core.state import ItemRow, Phase, StateStore
 from worc_connect.core.worc_cli import WorcCommand
 from worc_connect.home import ConnectorHome
@@ -555,3 +556,28 @@ def test_a_dry_run_plans_from_the_row_it_would_rebuild_without_writing_it(
     ]
     assert read_only.rows() == []
     read_only.close()
+
+
+def test_a_task_worc_reports_pending_again_is_not_announced_twice(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    adapter = StubAdapter(items=[work_item()])
+    loop = Watcher(
+        config=connector_config(home.clone_path),
+        adapter=adapter,
+        store=store,
+        home=home,
+        worc=WorcCommand(command="worc", repo_path=home.clone_path),
+    )
+    loop.tick(dry_run=False)
+    for status in ("running", "pending", "running"):
+        fake_worc.entries(**{"gh-142": status})
+        loop.tick(dry_run=False)
+
+    assert [state for _, state, _ in adapter.states] == [
+        "queued",
+        "in-progress",
+        "queued",
+        "in-progress",
+    ]
+    assert sum(body.startswith("Queued as") for _, body in adapter.comments) == 1

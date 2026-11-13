@@ -22,9 +22,8 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from enum import StrEnum
 from functools import cached_property
 from typing import Final
 
@@ -32,6 +31,7 @@ from worc_connect.config import ConnectorConfig
 from worc_connect.core import builder, gate
 from worc_connect.core.control import ProcessControl
 from worc_connect.core.items import WorkItem
+from worc_connect.core.plan import Action, PlannedAction, TickReport
 from worc_connect.core.reconcile import Reconciler
 from worc_connect.core.retrigger import Retrigger
 from worc_connect.core.state import (
@@ -46,7 +46,7 @@ from worc_connect.core.state import (
 )
 from worc_connect.core.worc_cli import WorcCommand, WorcUnavailable
 from worc_connect.core.writeback import PHASE_STATES, Published, WriteBack
-from worc_connect.home import ConnectorHome
+from worc_connect.home import ConnectorHome, unignored_home
 from worc_connect.trackers.base import TrackerAdapter, TrackerError
 
 logger = logging.getLogger(__name__)
@@ -67,49 +67,17 @@ _EXIT_FAILED: Final = 1
 _LABEL_WITHOUT_TASK: Final = "state-label-without-task"
 
 
-class Action(StrEnum):
-    """What the tick decided to do about one item, in the vocabulary a dry run prints."""
+class HomeNotIgnored(Exception):
+    """The clone's ``.gitignore`` no longer keeps the connector's home out of a commit.
 
-    STAGE = "stage-task"
-    FOLLOW = "follow"
-    SKIP = "skip"
-
-
-@dataclass(frozen=True)
-class PlannedAction:
-    """One item's outcome for this tick: what was decided and the reason it is reported under.
-
-    Carries the item's identifier and URL and nothing else the item wrote — a plan an operator reads
-    on a terminal is not a place for a stranger's text.
+    A refusal of the same kind as an unreachable tracker: the tick does nothing and changes no
+    state, a single pass exits 1, and a daemon asks again on the next tick — so restoring and
+    committing the line is all it takes to resume.
     """
 
-    item_id: str
-    url: str
-    action: Action
-    reason: str
-    task_id: str | None = None
-    branch: str | None = None
-    state: str | None = None
 
-
-@dataclass(frozen=True)
-class TickReport:
-    """What one tick saw and did — the value ``status`` summarizes and a dry run prints.
-
-    ``listed`` counts the items the tracker's listing returned; ``followed`` the ones read by
-    identifier because a task of theirs is still in flight while the poll window no longer lists
-    them. Both are handled the same way once read — the split is for the operator, who is owed the
-    difference between "nothing changed" and "nothing changed, and two tasks are still watched".
-    """
-
-    listed: int
-    actions: tuple[PlannedAction, ...]
-    watermark: datetime | None
-    followed: int = 0
-
-    def counted(self, action: Action) -> int:
-        """How many items this tick decided ``action`` for."""
-        return sum(1 for planned in self.actions if planned.action is action)
+# What ends a tick without touching anything: the caller logs it, and the next tick is the retry.
+_REFUSALS: Final = (TrackerError, WorcUnavailable, HomeNotIgnored)
 
 
 def _utc_now() -> datetime:
@@ -159,12 +127,19 @@ class Watcher:
     def tick(self, *, dry_run: bool) -> TickReport:
         """One pass over the items the tracker reports as changed.
 
-        Raises :class:`~worc_connect.trackers.base.TrackerError` when the tracker cannot be read
-        and :class:`~worc_connect.core.worc_cli.WorcUnavailable` when worc cannot be: the caller
+        Raises :class:`~worc_connect.trackers.base.TrackerError` when the tracker cannot be read,
+        :class:`~worc_connect.core.worc_cli.WorcUnavailable` when worc cannot be, and
+        :class:`HomeNotIgnored` when the clone would commit the connector's home: the caller
         decides whether that ends the process or costs one tick. Either way no row is moved on a
         guess — a step that cannot read its source leaves the row where it was, and the next tick
         is the retry.
         """
+        problem = unignored_home(self.home, self.config.worc.repo_path)
+        if problem is not None:
+            # Before the tracker is even asked: the home holds the cache of issue text, and every
+            # tick adds to it. The line that keeps it out of a commit lives in a tracked file a worc
+            # agent can revert as an unrelated change, so it is checked each tick, not once.
+            raise HomeNotIgnored(problem)
         now = self.now_fn()
         listed = self.adapter.list_items(self._listing_floor())
         if not dry_run:
@@ -203,7 +178,7 @@ class Watcher:
         """One tick; an unreachable tracker or worc ends the run rather than becoming a retry."""
         try:
             report = self.tick(dry_run=dry_run)
-        except (TrackerError, WorcUnavailable) as exc:
+        except _REFUSALS as exc:
             self._note_failure(exc, dry_run=dry_run)
             return _EXIT_FAILED
         self.on_tick(report)
@@ -233,7 +208,7 @@ class Watcher:
         """One tick whose infrastructure failure is logged and retried on the next one."""
         try:
             report = self.tick(dry_run=dry_run)
-        except (TrackerError, WorcUnavailable) as exc:
+        except _REFUSALS as exc:
             self._note_failure(exc, dry_run=dry_run)
             return
         self.on_tick(report)
@@ -419,11 +394,22 @@ class Watcher:
         reconciler, write_back = work
         moved = reconciler.advance(row, item, now=now)
         published = write_back.publish(moved, item)
+        if moved.phase is Phase.QUEUED and not moved.queued_announced:
+            # Recorded only once the publish returned: a comment a failed tracker call lost is
+            # posted on the next tick rather than forgotten.
+            moved = replace(moved, queued_announced=True)
+            self.store.save(moved)
         if published is Published.CLOSED:
             moved = self._retrigger.closed(moved, now=now)
         elif published is Published.SHOWN and moved.phase is Phase.NEEDS_INFO:
             moved = self._retrigger.question_posted(moved, item, now=now)
-        _log(item, moved.task_id, action, reason if action is Action.STAGE else str(moved.phase))
+        _log(
+            item,
+            moved.task_id,
+            action,
+            reason if action is Action.STAGE else str(moved.phase),
+            worc=moved.last_status,
+        )
         return self._planned(
             item, moved, action, reason if action is Action.STAGE else str(moved.phase)
         )
@@ -483,13 +469,29 @@ class Watcher:
 
     def _note_failure(self, exc: Exception, *, dry_run: bool) -> None:
         """Log an infrastructure failure by class and leave every row untouched."""
-        logger.warning("item=- task=- action=list result=skipped-%s (%s)", type(exc).__name__, exc)
+        action = "guard" if isinstance(exc, HomeNotIgnored) else "list"
+        logger.warning(
+            "item=- task=- action=%s result=skipped-%s (%s)", action, type(exc).__name__, exc
+        )
         if not dry_run:
             self._note_tick(self.now_fn(), f"skipped {type(exc).__name__}")
 
 
-def _log(item: WorkItem, task_id: str | None, action: Action, result: str) -> None:
-    """One line per action, carrying only the identifiers — never a title, a body or an author."""
+def _log(
+    item: WorkItem, task_id: str | None, action: Action, result: str, *, worc: str | None = None
+) -> None:
+    """One line per item per tick, carrying only identifiers — never a title, a body or an author.
+
+    A followed item's line also carries worc's own status for its task, whole and quoted: the
+    phase alone hides that ``running`` may mean ``parked (no daemon)`` or ``running (paused …)``,
+    and saying so on a second line is what used to double every followed item's share of the log.
+    """
+    suffix = "" if worc is None else f' worc="{" ".join(worc.split())}"'
     logger.info(
-        "item=%s task=%s action=%s result=%s", item.identifier, task_id or "-", action, result
+        "item=%s task=%s action=%s result=%s%s",
+        item.identifier,
+        task_id or "-",
+        action,
+        result,
+        suffix,
     )

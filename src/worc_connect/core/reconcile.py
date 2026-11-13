@@ -153,6 +153,8 @@ class Reconciler:
             research_task_id=(
                 None if stage is Stage.RESEARCH else self._triage_before(item.identifier, seq)
             ),
+            # The item already shows a state, so its task was announced by the run that set it.
+            queued_announced=True,
         )
         if persist:
             self.store.save(rebuilt)
@@ -303,14 +305,16 @@ class Reconciler:
         ``done`` deliberately does not end the row here: worc reports a task done from the moment
         it published, so what that status means to the connector is "now watch the pull request".
         An unknown status is not guessed at either: the row keeps its phase and the next tick asks
-        again, which is the fail-closed direction for a vocabulary that may grow.
+        again, which is the fail-closed direction for a vocabulary that may grow. ``parked`` maps
+        to running: worc holds the task and will run it, so nothing about the item changes.
         """
         if status_token(entry.status) == REJECTED_STATUS:
             return self._refused(row, entry, now=now)
         phase = _STATUS_PHASES.get(status_token(entry.status))
         if phase is None or phase is Phase.DONE:
             return replace(row, last_status=entry.status, updated_at=now)
-        _log(row, "follow", entry.status)
+        # Not logged here: the loop's own line for this item carries worc's status next to the
+        # phase it maps to, and a second line per followed item per tick was noise, not news.
         return replace(row, phase=phase, last_status=entry.status, updated_at=now)
 
     def _unknown_to_worc(self, row: ItemRow, task_id: str, *, now: datetime) -> ItemRow:

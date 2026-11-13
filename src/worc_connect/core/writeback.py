@@ -32,7 +32,7 @@ from typing import Final
 
 from worc_connect.config import ConnectorConfig
 from worc_connect.core.items import ItemState, WorkItem
-from worc_connect.core.state import ItemRow, Phase
+from worc_connect.core.state import ItemRow, Phase, Stage
 from worc_connect.trackers.base import TrackerAdapter
 
 logger = logging.getLogger(__name__)
@@ -172,7 +172,7 @@ def _comment_body(row: ItemRow, state: ItemState) -> str | None:
     """
     task = row.task_id or "the task"
     if state is ItemState.QUEUED:
-        return f"Queued as worc task `{task}`.\n"
+        return _queued_body(row, task)
     if state is ItemState.PR_OPEN and row.pr_url:
         return f"worc task `{task}` opened a pull request: {row.pr_url}\n"
     if state is ItemState.FAILED:
@@ -189,6 +189,21 @@ def _comment_body(row: ItemRow, state: ItemState) -> str | None:
             f"{row.research_note or 'no reason was recorded'}\n"
         )
     return None
+
+
+def _queued_body(row: ItemRow, task: str) -> str:
+    """Which of the item's tasks was queued: the triage step's, or the implementation's.
+
+    With the analysis step on, one item is queued twice, and two identical "queued as" comments
+    read as a duplicate rather than as two stages. The stage is the connector's own knowledge of
+    the row, so naming it adds no text this package did not write.
+    """
+    if row.stage is Stage.RESEARCH:
+        return (
+            f"Queued as worc triage task `{task}`: it analyses this issue first, and what it "
+            "concludes decides whether an implementation task follows.\n"
+        )
+    return f"Queued as worc implementation task `{task}`.\n"
 
 
 def _failure_body(row: ItemRow, task: str) -> str:

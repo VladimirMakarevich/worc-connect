@@ -46,11 +46,15 @@ def watcher(home: ConnectorHome, adapter: StubAdapter, store: StateStore) -> Wat
 
 
 def clone_files(clone: Path) -> set[str]:
-    """Every file under the clone except the connector's own home, as posix paths."""
+    """Every file under the clone the tick could have written, as posix paths.
+
+    The connector's own home is left out, and so is the ``.gitignore`` the operator committed — the
+    fixture's, which the tick only ever reads.
+    """
     return {
         path.relative_to(clone).as_posix()
         for path in clone.rglob("*")
-        if path.is_file() and ".worc-connect" not in path.parts
+        if path.is_file() and ".worc-connect" not in path.parts and path.name != ".gitignore"
     }
 
 

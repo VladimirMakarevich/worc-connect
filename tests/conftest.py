@@ -21,9 +21,15 @@ from worc_connect.home import ConnectorHome
 
 @pytest.fixture
 def clone(tmp_path: Path) -> Path:
-    """A directory standing in for the operator's clone."""
+    """A directory standing in for the operator's clone, its ``.gitignore`` already committed.
+
+    Already ignoring the connector's home, as the operator's clone does once ``init``'s line is
+    committed: the watch loop refuses to tick without it, and a test about anything else should not
+    have to say so. A test about that refusal removes or rewrites the file.
+    """
     path = tmp_path / "clone"
     path.mkdir()
+    (path / ".gitignore").write_text(".worc-connect/\n", encoding="utf-8", newline="")
     return path
 
 

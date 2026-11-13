@@ -40,6 +40,7 @@ pipx install "git+https://github.com/VladimirMakarevich/worc-connect.git#egg=wor
 cd /path/to/your/clone                     # the same clone `worc watch` runs in
 gh auth status                             # must say you are logged in
 worc-connect init --repo OWNER/REPO        # writes .worc-connect/config.yaml, gitignores the home
+git add .gitignore && git commit -m "Ignore the worc-connect home"   # before the first watch
 worc-connect watch --once --dry-run        # lists the gated items and writes nothing at all
 ```
 
@@ -58,7 +59,7 @@ Exactly one of these is on an issue at a time; re-applying the one it already ha
 
 | Label | What it means |
 | --- | --- |
-| `worc:queued` | The task file has been promoted into worc's queue. The comment names the task id. |
+| `worc:queued` | The task file has been promoted into worc's queue. The comment names the task id and its stage — a triage task or an implementation task. |
 | `worc:in-progress` | worc is running the task. |
 | `worc:pr-open` | The task opened a pull request; the comment carries its URL. From here the connector only watches — it never pushes to the branch. |
 | `worc:done` | The pull request was merged (and, unless you set `close_on_merge: false`, the issue was closed), or worc finished the task without opening one. |

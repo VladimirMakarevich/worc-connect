@@ -26,7 +26,8 @@ from support import (
     work_item,
 )
 from worc_connect.core.items import PullRequestState
-from worc_connect.core.loop import Action, Watcher
+from worc_connect.core.loop import Watcher
+from worc_connect.core.plan import Action
 from worc_connect.core.state import ItemRow, Phase, StateStore
 from worc_connect.core.worc_cli import WorcCommand
 from worc_connect.home import ConnectorHome

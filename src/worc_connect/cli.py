@@ -26,7 +26,8 @@ from pathlib import Path
 from worc_connect import __version__, flows
 from worc_connect import config as config_module
 from worc_connect.config import ConfigError, ConnectorConfig
-from worc_connect.core.loop import Action, TickReport, Watcher
+from worc_connect.core.loop import Watcher
+from worc_connect.core.plan import Action, TickReport
 from worc_connect.core.state import (
     META_LAST_TICK_AT,
     META_LAST_TICK_RESULT,
@@ -36,7 +37,13 @@ from worc_connect.core.state import (
 )
 from worc_connect.core.worc_cli import WorcCommand, WorcUnavailable
 from worc_connect.core.worc_version import MINIMUM_VERSION
-from worc_connect.home import HOME_DIRNAME, ConnectorHome, ensure_gitignore_entry, render_config
+from worc_connect.home import (
+    HOME_DIRNAME,
+    ConnectorHome,
+    ensure_gitignore_entry,
+    gitignore_line,
+    render_config,
+)
 from worc_connect.trackers.base import AdapterFactory, TrackerAdapter
 
 ENTRY_POINT_GROUP = "worc_connect.trackers"
@@ -147,8 +154,15 @@ def _cmd_init(args: argparse.Namespace) -> int:
         render_config(tracker=args.tracker, repo=args.repo), encoding="utf-8", newline=""
     )
     print(f"init: wrote {home.config_path.as_posix()}")
-    if ensure_gitignore_entry(home.clone_path):
-        print(f"init: added {HOME_DIRNAME}/ to {home.clone_path.as_posix()}/.gitignore")
+    gitignore = f"{home.clone_path.as_posix()}/.gitignore"
+    if ensure_gitignore_entry(home):
+        print(f"init: added {gitignore_line(home)} to {gitignore}")
+    # Said every time, not only when the line is new: the line that keeps the cache of issue text
+    # out of git is only safe once committed — worc's agent works in this same tree, and an
+    # uncommitted edit to a tracked file is exactly what it reverts as unrelated to its task.
+    print(f"init: commit {gitignore} before the first `worc-connect watch`; until it is")
+    print("init:   committed a worc task can revert it, and watch refuses to tick while the")
+    print("init:   home is not ignored")
     print("init: review the gate and the dispatch fields, then run")
     print("init:   worc-connect watch --once --dry-run")
     return _EXIT_OK
@@ -315,8 +329,14 @@ def _configure_logging(home: ConnectorHome, *, dry_run: bool) -> None:
 
     A dry run writes nothing anywhere, log file included: the promise is about the filesystem, not
     only about the task folder, and an operator's first safe command should leave no trace at all.
+    Its stderr carries warnings and errors only — a refusal, a tracker that could not be read — and
+    not the per-item INFO lines: the ``plan:`` lines on stdout already say the same, item by item,
+    and the two interleaved on one terminal made the plan hard to read.
     """
-    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    console = logging.StreamHandler(sys.stderr)
+    if dry_run:
+        console.setLevel(logging.WARNING)
+    handlers: list[logging.Handler] = [console]
     if not dry_run:
         home.path.mkdir(parents=True, exist_ok=True)
         handlers.append(

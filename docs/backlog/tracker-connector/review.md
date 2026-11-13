@@ -143,6 +143,8 @@ The same gap exists one level down: the fake `gh` never has to reproduce GitHub'
 
 **Resolution (2026-09-15).** `StubAdapter` now honours `since` (open items updated at or after it, oldest first), moves the item's `updated_at` one second past the latest stamp it has handed out on every `set_state`, `comment` and `close`, and keeps a closed item readable by `get_item` while dropping it from the listing. The existing "nobody answered" test exposed **F3** the moment it did, and the eviction of **F1** became reproducible against the loop. The fake `gh` half of the gap stays open: `issue list` still answers from a static fixture, and the search string is asserted rather than exercised.
 
+**Resolution, the fake `gh` half (2026-11-13).** `FakeGh.issues(...)` turns the fake into a small repository: `issue list` filters by `--state` and the `updated:>=` qualifier, orders by `sort:updated-asc`, honours `--limit` and projects `--json`; `issue view` / `edit` / `comment` / `close` change the stored issue and move its `updatedAt`. `tests/test_github_poll.py` runs two loop ticks through the real GitHub adapter against it, with an item behind the window, one inside the overlap and a closed one.
+
 ## F7 — `ensure_labels` runs once per tick, not once per process
 
 **Severity: Medium.**

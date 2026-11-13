@@ -7,6 +7,7 @@ never carry: a word the item's author wrote.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,7 +16,7 @@ import pytest
 from support import StubAdapter, connector_config, work_item
 from worc_connect.config import ResearchMode
 from worc_connect.core.items import ItemState
-from worc_connect.core.state import ItemRow, Phase
+from worc_connect.core.state import ItemRow, Phase, Stage
 from worc_connect.core.writeback import (
     PHASE_STATES,
     STATE_PHASES,
@@ -149,7 +150,20 @@ def test_queueing_comments_with_the_task_id(clone: Path) -> None:
 
     identifier, body = adapter.comments[0]
     assert identifier == "142"
-    assert "gh-142" in body
+    assert body == "Queued as worc implementation task `gh-142`.\n"
+
+
+def test_queueing_a_triage_task_says_it_is_the_triage_stage(clone: Path) -> None:
+    # The second real run: `gh-31` (triage) and `gh-31.2` (implementation) were announced with the
+    # same sentence, which read as one task queued twice.
+    adapter = StubAdapter(items=[work_item()])
+    triage_row = replace(row(Phase.QUEUED), stage=Stage.RESEARCH)
+
+    write_back(clone, adapter, research=ResearchMode.WORC).publish(triage_row, adapter.items[0])
+
+    body = adapter.comments[0][1]
+    assert body.startswith("Queued as worc triage task `gh-142`")
+    assert "implementation" in body  # says what may follow, in the connector's own words
 
 
 def test_an_open_pull_request_comments_with_its_url(clone: Path) -> None:

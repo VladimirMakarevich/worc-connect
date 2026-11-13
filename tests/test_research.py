@@ -187,6 +187,25 @@ def test_the_item_is_never_shown_the_step_between_the_two_tasks(
     assert "researched" not in {state for _, state, _ in adapter.states}
 
 
+def test_the_two_queued_comments_name_their_stage(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    adapter = StubAdapter(items=[work_item()])
+    loop = watcher(home, adapter, store)
+    loop.tick(dry_run=False)
+    fake_worc.entries(**{"gh-142": "running"})
+    loop.tick(dry_run=False)
+    write_report(home, "gh-142", report_text(Verdict.ACTIONABLE, reason="do it"))
+    fake_worc.entries(**{"gh-142": "done"})
+    loop.tick(dry_run=False)
+
+    queued = [body for _, body in adapter.comments if body.startswith("Queued as")]
+    assert len(queued) == 2
+    assert queued[0].startswith("Queued as worc triage task `gh-142`")
+    assert queued[1] == "Queued as worc implementation task `gh-142.2`.\n"
+    assert all("do it" not in body for body in queued)  # nothing of the report is quoted
+
+
 def test_a_needs_info_report_asks_the_reporter_and_queues_nothing(
     home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
 ) -> None:
@@ -524,3 +543,84 @@ def test_with_the_step_off_a_rebuilt_row_ignores_a_triage_directory_left_behind(
     watcher(home, adapter, store, research=ResearchMode.OFF).tick(dry_run=False)
 
     assert live_row(store).stage is Stage.IMPLEMENTATION
+
+
+# --- worc leaving a finished triage task's file in pending/ ---------------------------------------
+#
+# worc 0.16.0a1 leaves a task that publishes nothing (the triage flow's `publishing: none`) in
+# `tasks/pending/<id>.md` after `done` — a defect recorded and fixed on worc's side. The fake worc
+# reproduces it as a matter of course: its `promote` moves the file into pending/ and nothing ever
+# moves it out. These tests pin down that the connector reads the listing's `done` over the file's
+# presence, across a deleted cache, and never runs the item's triage a second time.
+
+
+def promotes(fake_worc: FakeWorc, task_id: str) -> int:
+    return sum(1 for call in fake_worc.calls if call[:2] == ["promote", task_id])
+
+
+def fresh_store(home: ConnectorHome, store: StateStore) -> StateStore:
+    store.close()
+    home.state_path.unlink()
+    return StateStore(home.state_path)
+
+
+def test_a_finished_triage_left_in_pending_is_not_re_run_after_a_rebuild(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    adapter = StubAdapter(items=[work_item()])
+    loop = triaged(
+        home,
+        store,
+        fake_worc,
+        adapter=adapter,
+        report=report_text(Verdict.NEEDS_INFO, reason="Which browser?"),
+    )
+    loop.tick(dry_run=False)
+    assert (home.clone_path / "tasks" / "pending" / "gh-142.md").is_file()  # the defect
+    comments = len(adapter.comments)
+
+    rebuilt_store = fresh_store(home, store)
+    rebuilt_loop = watcher(home, adapter, rebuilt_store)
+    rebuilt_loop.tick(dry_run=False)
+    rebuilt_loop.tick(dry_run=False)
+
+    rebuilt = rebuilt_store.latest_row("github", "142")
+    assert rebuilt is not None
+    assert (rebuilt.seq, rebuilt.stage, rebuilt.phase) == (1, Stage.RESEARCH, Phase.NEEDS_INFO)
+    assert promotes(fake_worc, "gh-142") == 1
+    assert sorted(path.name for path in (home.clone_path / "tasks" / "preparing").iterdir()) == []
+    assert len(adapter.comments) == comments  # nothing re-announced either
+    rebuilt_store.close()
+
+
+def test_a_triage_done_before_its_report_was_read_is_read_once_after_a_rebuild(
+    home: ConnectorHome, store: StateStore, fake_worc: FakeWorc
+) -> None:
+    # The cache is lost between worc finishing the triage task and the connector reading its
+    # report: the item still shows `in-progress`, the file still sits in pending/, and the listing
+    # says `done`. The rebuilt row must follow that triage task to its report, not start another.
+    adapter = StubAdapter(items=[work_item()])
+    loop = watcher(home, adapter, store)
+    loop.tick(dry_run=False)
+    fake_worc.entries(**{"gh-142": "running"})
+    loop.tick(dry_run=False)
+    write_report(home, "gh-142", report_text(Verdict.ACTIONABLE, reason="do it"))
+    fake_worc.entries(**{"gh-142": "done"})
+
+    rebuilt_store = fresh_store(home, store)
+    rebuilt_loop = watcher(home, adapter, rebuilt_store)
+    rebuilt_loop.tick(dry_run=False)
+    fake_worc.entries(**{"gh-142": "done", "gh-142.2": "running"})
+    rebuilt_loop.tick(dry_run=False)
+
+    assert [(row.seq, row.stage, row.task_id) for row in rebuilt_store.rows()] == [
+        (1, Stage.RESEARCH, "gh-142"),
+        (2, Stage.IMPLEMENTATION, "gh-142.2"),
+    ]
+    assert promotes(fake_worc, "gh-142") == 1
+    assert promotes(fake_worc, "gh-142.2") == 1
+    assert {path.name for path in (home.clone_path / "tasks" / "pending").iterdir()} == {
+        "gh-142.md",
+        "gh-142.2.md",
+    }
+    rebuilt_store.close()

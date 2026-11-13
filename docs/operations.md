@@ -48,7 +48,7 @@ worc-connect status
 
 Prints the repository and home it is using, the poll watermark, how the last tick ended, and one line per item it has taken on — identifiers, phase, task id, branch and pull request, and nothing an item wrote. It opens the database read-only, so it cannot create or change anything.
 
-`.worc-connect/connect.log` is the running account: one line per action, `item=… task=… action=… result=…`. It carries ids and URLs only — never issue text, never a diff, never anything read out of worc's home. It rotates at 5 MB with three older files kept, so a daemon on a busy repository never grows it without end.
+`.worc-connect/connect.log` is the running account: one line per action, `item=… task=… action=… result=…`. A followed item gets one line per tick, `action=follow result=<phase>`, with worc's own status for the task as `worc=<status>` when it has one — `result=running worc=parked` means worc holds the task but no daemon is running it. It carries ids and URLs only — never issue text, never a diff, never anything read out of worc's home. It rotates at 5 MB with three older files kept, so a daemon on a busy repository never grows it without end.
 
 Lines worth recognising:
 
@@ -57,6 +57,7 @@ Lines worth recognising:
 | `action=list result=skipped-TrackerUnavailable` | The tracker could not be reached this tick. No state changed; the next tick is the retry. |
 | `action=list result=skipped-TrackerAuth` | `gh` is not logged in — this one will not fix itself. |
 | `action=list result=skipped-TrackerRateLimited` | You are being throttled. Raise `poll_interval_seconds`. |
+| `action=guard result=skipped-HomeNotIgnored` | The clone's `.gitignore` no longer keeps the home out of a commit. Nothing was done; restore and commit the line and the next tick resumes. |
 | `action=fetch result=skipped-…` | One in-flight item could not be read by identifier this tick; its row waits a tick. |
 | `result=state-label-without-task` | An issue carries a connector state label with no worc task behind it. It is left alone — remove the label to let the connector take that issue on. |
 | `action=promote result=…` | The handoff into worc, per task. |
@@ -100,7 +101,7 @@ If the run needs to start over from the issue instead, take the trigger label of
 ## Housekeeping
 
 - **`state.db` is disposable.** Delete it whenever you like; the next tick rebuilds every row from the tracker, `worc list` and the lifecycle folders.
-- **The home is gitignored** by `init`. If you moved the home or rewrote `.gitignore`, make sure it still is — the cache holds issue text.
+- **The home is gitignored** by `init`, and `watch` refuses to tick while the clone's root `.gitignore` does not name it — the cache holds issue text. A home outside the clone needs no line; one under another name or in a subdirectory needs a line naming it.
 - **Nothing here needs a credential.** The connector stores no token; `gh auth status` is the whole of its authentication story. Rotating your `gh` login needs no change on this side.
 - **Cost.** A tick with nothing new makes no model call and writes nothing. What costs money is worc running the tasks you gated — one agent run per gated item, and two with the [triage step](triage.md) on.
 

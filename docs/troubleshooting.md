@@ -14,14 +14,14 @@ gh auth status                         # the connector's entire authentication s
 worc --version                         # which contract the connector will use
 ```
 
-A dry run is always safe: no task file, no state row, no log line, no tracker write.
+A dry run is always safe: no task file, no state row, no log line, no tracker write. Its stderr carries warnings and errors only; the plan on stdout is the per-item account.
 
 ## Exit codes
 
 | Code | Meaning | Typical cause |
 | --- | --- | --- |
 | `0` | The run completed. | — |
-| `1` | An infrastructure failure, or a refused start. | The tracker was unreachable during a single pass; another watcher holds the PID file; `init` found a configuration already there. |
+| `1` | An infrastructure failure, or a refused start. | The tracker was unreachable during a single pass; the clone no longer ignores the connector's home; another watcher holds the PID file; `init` found a configuration already there. |
 | `2` | A usage or configuration problem. **Nothing was written and no tracker call was made.** | An unparseable or invalid configuration; a gate that admits nothing; a tracker with no adapter installed. |
 
 ## Nothing happens to my issue
@@ -45,6 +45,7 @@ A dry run is always safe: no task file, no state row, no log line, no tracker wr
 | `already exists; edit it instead` (from `init`, exit `1`) | A configuration is already there and `init` will not overwrite it. | Edit `.worc-connect/config.yaml`, or delete it yourself first. |
 | `another watcher holds .worc-connect/connect.pid` | A `watch` daemon is running — or crashed and left the file. Liveness is deliberately not guessed at. | Make sure no watcher is running, then delete the PID file. |
 | `--repo must name one repository as OWNER/REPO` | `init` got something that is not one repository. | Pass exactly `OWNER/REPO`. |
+| ``the connector's home `.worc-connect/` is not ignored by …/.gitignore`` — `action=guard result=skipped-HomeNotIgnored`, exit `1` | The clone's root `.gitignore` does not name the home. Usually `init`'s line was never committed and a worc task reverted it as an unrelated change. Checked before every tick, the dry run included; no tracker call is made. | Add the line the message names (`.worc-connect/`) to the root `.gitignore` and **commit it**. A daemon resumes on its next tick. Only exact spellings of the home count — not a broader glob, a nested `.gitignore`, `.git/info/exclude` or a global excludes file — because the check reads text and never runs `git`. |
 
 ## The tracker side fails
 

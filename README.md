@@ -91,7 +91,7 @@ Every command takes `--home PATH` to point at a connector home other than `./.wo
 ## Two things to know before you run it
 
 - **Issue text is untrusted input from strangers.** It ends up in a prompt to an agent with write access to your repository. That is why nothing becomes a task unless a maintainer gated it, why the connector refuses to start with no gate rule, and why an issue's text reaches only the task file — never a command, a log line, a label, or a comment.
-- **`auto_merge` stays unset.** An issue-sourced task under `auto_merge: true` is where a prompt injection in an issue turns into merged code with no human in between. `worc-connect init` does not set it; worc's own policy and your review of the PR decide.
+- **`auto_merge` stays unset.** An issue-sourced task under `auto_merge: true` is where a prompt injection in an issue turns into merged code with no human in between. `worc-connect init` does not set it; worc's own policy and your review of the PR decide. If you want it for some issues, `task.auto_merge_labels` opts in one item at a time by a label a maintainer applies — and is exactly as safe as the rule for who can apply that label: an issue template that adds it automatically hands the merge to anyone who opens an issue. See the [configuration reference](docs/configuration.md#choosing-the-flow-and-the-merge-per-item).
 
 ## Documentation
 

@@ -409,6 +409,7 @@ def install_launcher(bin_dir: Path, name: str, script: Path) -> None:
 def task_config(
     *,
     task_type: str | None = None,
+    task_type_by_label: dict[str, str] | None = None,
     queue: str | None = None,
     priority: str | None = None,
     commit_type: str | None = None,
@@ -416,10 +417,12 @@ def task_config(
     branch_prefix: str = "worc",
     id_prefix: str = "gh",
     auto_merge: bool | None = None,
+    auto_merge_labels: tuple[str, ...] = (),
 ) -> TaskConfig:
     """The dispatch fields of a generated task, with nothing emitted unless a test asks for it."""
     return TaskConfig(
         task_type=task_type,
+        task_type_by_label=task_type_by_label or {},
         queue=queue,
         priority=priority,
         commit_type=commit_type,
@@ -427,6 +430,7 @@ def task_config(
         branch_prefix=branch_prefix,
         id_prefix=id_prefix,
         auto_merge=auto_merge,
+        auto_merge_labels=auto_merge_labels,
     )
 
 

@@ -105,11 +105,12 @@ def render_config(*, tracker: str, repo: str) -> str:
     """The configuration file ``init`` writes: every key the loader accepts, with its default.
 
     Written out in full, comments included, because this file is the operator's whole interface to
-    the connector's behaviour and a key they cannot see is a key they will not set. Two values are
-    deliberately left out: ``task.commit_type_by_label``, which has no sensible default mapping,
-    and ``task.auto_merge`` — an issue-sourced task that merges itself is where a prompt injection
-    in a stranger's issue becomes merged code with no human in between, so the connector never sets
-    it and says so where the operator reads it.
+    the connector's behaviour and a key they cannot see is a key they will not set. Four values are
+    deliberately left out: ``task.commit_type_by_label`` and ``task.task_type_by_label``, which
+    have no sensible default mapping, and ``task.auto_merge`` with ``task.auto_merge_labels`` — an
+    issue-sourced task that merges itself is where a prompt injection in a stranger's issue becomes
+    merged code with no human in between, so the connector never sets either and says so where the
+    operator reads it.
     """
     return f"""\
 # worc-connect — tracker connector for wastech-orchestrator.
@@ -130,7 +131,9 @@ gate:
 # Dispatch fields for the generated task. A key left out here is a key the task file does not carry,
 # so worc's own default stands instead of the connector's opinion of it.
 task:
-  task_type: implementation
+  task_type: implementation # the worc flow the task runs
+  # task_type_by_label: {{ "flow:quick": quick_fix }}
+  #   A label on the item picks one of these flows instead; the first matching label wins.
   queue: default
   priority: mid
   commit_type: feat
@@ -141,6 +144,10 @@ task:
   #   Left unset on purpose. An issue-sourced task under `auto_merge: true` is where a prompt
   #   injection in an issue turns into merged code with nobody in between; worc's own policy and
   #   your review of the pull request are what should decide.
+  # auto_merge_labels: [automerge]
+  #   Per-item opt-in: a task whose item carries one of these labels gets `auto_merge: true`.
+  #   Only safe if nobody but a maintainer can put the label on an issue — check that no issue
+  #   template applies it automatically.
 
 # How to reach worc, and the two things both sides have to agree on. The connector never opens
 # worc's own configuration — its only read out of worc is `worc list` — so if you changed

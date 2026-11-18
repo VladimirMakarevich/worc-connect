@@ -115,9 +115,14 @@ class TaskConfig:
 
     Every field but the prefixes is optional: a value of ``None`` means the key is not emitted at
     all, so worc's own default stands rather than the connector's opinion of it.
+
+    The ``*_by_label`` maps and ``auto_merge_labels`` let a maintainer pick, per item, among values
+    the operator wrote here. A label selects a value; it never becomes one, so the front matter
+    still carries nothing an item's author could spell.
     """
 
     task_type: str | None
+    task_type_by_label: dict[str, str]
     queue: str | None
     priority: str | None
     commit_type: str | None
@@ -125,6 +130,7 @@ class TaskConfig:
     branch_prefix: str
     id_prefix: str
     auto_merge: bool | None
+    auto_merge_labels: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -224,6 +230,7 @@ def _task(section: Section) -> TaskConfig:
     """The dispatch fields, with the id prefix checked against worc's id grammar."""
     section.reject_unknown(
         "task_type",
+        "task_type_by_label",
         "queue",
         "priority",
         "commit_type",
@@ -231,6 +238,7 @@ def _task(section: Section) -> TaskConfig:
         "branch_prefix",
         "id_prefix",
         "auto_merge",
+        "auto_merge_labels",
     )
     id_prefix = section.string("id_prefix", DEFAULT_ID_PREFIX)
     # Validated through a composed sample id rather than on its own: the prefix is only ever seen by
@@ -242,6 +250,7 @@ def _task(section: Section) -> TaskConfig:
         )
     return TaskConfig(
         task_type=section.optional_string("task_type"),
+        task_type_by_label=section.string_map("task_type_by_label"),
         queue=section.optional_string("queue"),
         priority=section.optional_string("priority"),
         commit_type=section.optional_string("commit_type"),
@@ -249,7 +258,30 @@ def _task(section: Section) -> TaskConfig:
         branch_prefix=section.string("branch_prefix", DEFAULT_BRANCH_PREFIX),
         id_prefix=id_prefix,
         auto_merge=section.optional_flag("auto_merge"),
+        auto_merge_labels=section.string_list("auto_merge_labels"),
     )
+
+
+def _refuse_state_labels(task: TaskConfig, labels_prefix: str) -> None:
+    """Refuse a dispatch label the connector itself puts on items.
+
+    The connector adds and removes every label under its state prefix, so such a label is not a
+    maintainer's choice at all. Worse, a re-triggered item still shows the previous attempt's state
+    label: with ``auto_merge_labels: [worc:failed]`` the connector's own write-back would grant the
+    next attempt a merge nobody asked for. Compared case-insensitively, as trackers keep labels.
+    """
+    prefix = labels_prefix.casefold()
+    keyed = (
+        ("task.task_type_by_label", tuple(task.task_type_by_label)),
+        ("task.auto_merge_labels", task.auto_merge_labels),
+    )
+    for key, labels in keyed:
+        for label in labels:
+            if label.casefold().startswith(prefix):
+                raise ConfigError(
+                    f"`{key}` names `{label}`, which is under the connector's own state prefix "
+                    f"`{labels_prefix}`; pick a label the connector does not write"
+                )
 
 
 def is_repo_relative_dir(value: str) -> bool:
@@ -377,16 +409,22 @@ def load(path: Path) -> ConnectorConfig:
     repo = document.string("repo")
     if not is_valid_repo(repo):
         raise ConfigError("`repo` must name one repository as `OWNER/REPO`")
+    poll_interval_seconds = document.positive_int(
+        "poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS
+    )
+    gate = _gate(document.section("gate"))
+    task = _task(document.section("task"))
+    worc = _worc(document.section("worc"), clone_root=path.parent.parent)
+    write_back = _write_back(document.section("write_back"))
+    _refuse_state_labels(task, write_back.labels_prefix)
     return ConnectorConfig(
         schema_version=version,
         tracker=tracker,
         repo=repo,
-        poll_interval_seconds=document.positive_int(
-            "poll_interval_seconds", DEFAULT_POLL_INTERVAL_SECONDS
-        ),
-        gate=_gate(document.section("gate")),
-        task=_task(document.section("task")),
-        worc=_worc(document.section("worc"), clone_root=path.parent.parent),
-        write_back=_write_back(document.section("write_back")),
+        poll_interval_seconds=poll_interval_seconds,
+        gate=gate,
+        task=task,
+        worc=worc,
+        write_back=write_back,
         research=_research(document.section("research")),
     )

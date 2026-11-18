@@ -20,6 +20,7 @@ gate:
 
 task:
   task_type: implementation
+  # task_type_by_label: { "flow:quick": quick_fix }
   queue: default
   priority: mid
   commit_type: feat
@@ -27,6 +28,7 @@ task:
   branch_prefix: worc
   id_prefix: gh
   # auto_merge: false
+  # auto_merge_labels: [automerge]
 
 worc:
   command: worc
@@ -76,6 +78,7 @@ A key left out here is a key the generated task file does not carry, so worc's o
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `task_type` | absent | worc's task type / flow name. |
+| `task_type_by_label` | `{}` | Per-label override of `task_type`, e.g. `{ "flow:quick": quick_fix }`: a maintainer picks the flow of one item by labelling it. |
 | `queue` | absent | worc's queue. |
 | `priority` | absent | worc's priority. |
 | `commit_type` | absent | The conventional-commit type for the task. |
@@ -83,6 +86,21 @@ A key left out here is a key the generated task file does not carry, so worc's o
 | `branch_prefix` | `worc` | First segment of the branch the connector names. |
 | `id_prefix` | `gh` | First segment of the task id (`gh-142`). Validated at load against worc's id grammar, including the trailing-dot and Windows device-name rules, so a prefix that could not build a legal id is refused before any task exists. |
 | `auto_merge` | absent | **Left unset by `init` on purpose.** An issue-sourced task under `auto_merge: true` is where a prompt injection in a stranger's issue turns into merged code with nobody in between. worc's own policy and your review of the pull request are what should decide. |
+| `auto_merge_labels` | `[]` | Per-item opt-in: a task whose item carries one of these labels gets `auto_merge: true`, whatever `auto_merge` says. Read the caveat below before setting it. |
+
+### Choosing the flow and the merge per item
+
+The three `*_by_label` / `*_labels` keys let a maintainer decide, per issue, among values you wrote here. A label only **selects** a value from this file; its own text never reaches the task, so nothing an issue's author can spell ends up in the front matter.
+
+- **The first matching label wins**, in the order the item lists its labels, not the order of the mapping. Matching is case-insensitive. An item with no matching label gets the plain `task_type` / `commit_type` / `auto_merge`, or no key at all when that is absent, so worc's own default stands.
+- **These labels do not gate anything.** An item still needs a trigger label from `gate.labels` (or a listed author) to become a task; `flow:quick` alone does nothing.
+- **They are read when the task is built.** Changing a label while a task runs changes nothing for that task; a re-trigger builds the next one from the labels the item carries then.
+- **A label under `write_back.labels_prefix` is refused at load.** The connector adds and removes those labels itself, and a re-triggered item still shows the last attempt's state, so `auto_merge_labels: ["worc:failed"]` would let the connector's own write-back opt the next task into a merge.
+- **The connector does not create these labels.** Create them once on the repository, e.g. `gh label create automerge --repo OWNER/REPO`.
+- **With the triage step on**, the triage task keeps its own flow; the label-chosen flow and merge apply to the implementation task built from the report.
+- **A flow name must be one worc knows** — a file `.worc/flows/<name>.yaml` in the clone. The connector never reads worc's flow directory, so it cannot check the name: a typo passes worc's task gate and fails when worc runs the task ("flow not found"), which the item shows as `worc:failed`.
+
+**The `auto_merge_labels` caveat.** The label is the whole of the protection, so it is only as strong as the rule for who can apply it. On GitHub only people with triage access or above can label an issue — but an issue template or issue form whose `labels:` lists the auto-merge label applies it for anyone who opens an issue from it, and so does any workflow or bot that labels new issues. Check `.github/ISSUE_TEMPLATE/` and your automation before you set this key, and keep the label off every template.
 
 ## `worc` — how the connector reaches the orchestrator
 

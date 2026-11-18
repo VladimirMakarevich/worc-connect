@@ -13,7 +13,7 @@ The connector sits between strangers who write issues and an agent with write ac
 
 ## The caveat that is documented, not softened
 
-An issue-sourced task under `auto_merge: true` is where a prompt injection in an issue turns into merged code without a human in between. The connector's `init` leaves `auto_merge` unset so worc's own policy decides; the README says why, and no change may make the connector set it by default.
+An issue-sourced task under `auto_merge: true` is where a prompt injection in an issue turns into merged code without a human in between. The connector's `init` leaves `auto_merge` and `auto_merge_labels` unset so worc's own policy decides; the README says why, and no change may make the connector set either by default. `auto_merge_labels` is an operator's per-item opt-in and is exactly as strong as the rule for who can apply the label — an issue template or a bot that adds it hands the merge to whoever opens the issue — so its documentation says that next to the key, and a label can only turn the merge on, never be the value.
 
 ## Security mechanisms must not degrade the product
 

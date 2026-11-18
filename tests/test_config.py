@@ -284,6 +284,80 @@ def test_a_commit_type_mapping_of_something_other_than_strings_is_refused(
         load(path)
 
 
+def test_the_per_label_flow_and_auto_merge_load(home: ConnectorHome) -> None:
+    document = base_config()
+    document["task"]["task_type_by_label"] = {"flow:quick": "quick_fix"}
+    document["task"]["auto_merge_labels"] = ["automerge"]
+    path = write_config(home, document)
+
+    config = load(path)
+
+    assert config.task.task_type_by_label == {"flow:quick": "quick_fix"}
+    assert config.task.auto_merge_labels == ("automerge",)
+    assert config.task.auto_merge is None
+
+
+def test_the_per_label_keys_are_empty_until_configured(home: ConnectorHome) -> None:
+    config = load(write_config(home, base_config()))
+
+    assert config.task.task_type_by_label == {}
+    assert config.task.auto_merge_labels == ()
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("task_type_by_label", {"flow:quick": 7}),
+        ("task_type_by_label", ["flow:quick"]),
+        ("auto_merge_labels", "automerge"),
+        ("auto_merge_labels", ["automerge", ""]),
+    ],
+)
+def test_a_per_label_key_of_the_wrong_shape_is_refused(
+    home: ConnectorHome, key: str, value: object
+) -> None:
+    document = base_config()
+    document["task"][key] = value
+    path = write_config(home, document)
+
+    with pytest.raises(ConfigError, match=re.escape(f"`task.{key}`")):
+        load(path)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("task_type_by_label", {"worc:failed": "quick_fix"}),
+        ("auto_merge_labels", ["worc:failed"]),
+        ("auto_merge_labels", ["WORC:Queued"]),
+    ],
+)
+def test_a_per_label_key_under_the_state_prefix_is_refused(
+    home: ConnectorHome, key: str, value: object
+) -> None:
+    # The connector writes every label under its prefix itself; a re-triggered item still shows the
+    # last attempt's state, so such a label would let the write-back choose the next task's shape.
+    document = base_config()
+    document["task"][key] = value
+    path = write_config(home, document)
+
+    with pytest.raises(ConfigError, match=re.escape(f"`task.{key}` names")):
+        load(path)
+
+
+def test_the_state_prefix_check_follows_the_configured_prefix(home: ConnectorHome) -> None:
+    document = base_config()
+    document["write_back"]["labels_prefix"] = "bot/"
+    document["task"]["auto_merge_labels"] = ["worc:automerge"]
+    path = write_config(home, document)
+
+    assert load(path).task.auto_merge_labels == ("worc:automerge",)
+
+    document["task"]["auto_merge_labels"] = ["bot/automerge"]
+    with pytest.raises(ConfigError, match=re.escape("`bot/`")):
+        load(write_config(home, document))
+
+
 def test_a_section_that_is_not_a_mapping_is_refused(home: ConnectorHome) -> None:
     document = base_config()
     document["gate"] = ["worc"]

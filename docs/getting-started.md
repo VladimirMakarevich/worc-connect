@@ -72,10 +72,10 @@ Both rules are filters applied in sequence. With `labels: [worc]` alone, anyone 
 The remaining blocks decide what the generated task looks like and what appears on the issue. The defaults are a working setup; every key, with its default and its consequence, is in the [configuration reference](configuration.md). The three worth a look now:
 
 - `poll_interval_seconds` (default `300`) — how long the loop waits between ticks. The stop sentinel is checked about once a second during the wait, so stopping never waits out the interval.
-- `task.*` — the dispatch fields the task file carries: `task_type`, `queue`, `priority`, `commit_type`, the branch prefix and the id prefix. A key you delete is a key the task does not carry, so worc's own default stands instead.
+- `task.*` — the dispatch fields the task file carries: `task_type`, `queue`, `priority`, `commit_type`, the branch prefix and the id prefix. A key you delete is a key the task does not carry, so worc's own default stands instead. `task_type_by_label` and `commit_type_by_label` let a label on the issue pick the flow or the commit type for that one item.
 - `worc.tasks_dir` and `worc.max_*` — worc's `paths.tasks_dir` and its `validation.max_*` limits, restated here. The connector never opens worc's configuration, so **if you changed either over there, change it here too**; a mismatch shows up as a task worc never queues, or a file its gate quarantines.
 
-`task.auto_merge` is commented out on purpose and should stay that way. An issue-sourced task that merges itself is where a prompt injection in a stranger's issue becomes merged code with nobody in between.
+`task.auto_merge` is commented out on purpose and should stay that way. An issue-sourced task that merges itself is where a prompt injection in a stranger's issue becomes merged code with nobody in between. `task.auto_merge_labels` opts in one issue at a time by a label; set it only after checking that no issue template or bot applies that label for people who are not maintainers.
 
 ## Step 5 — the dry run
 

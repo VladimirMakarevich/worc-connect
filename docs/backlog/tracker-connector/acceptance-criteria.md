@@ -43,6 +43,9 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 - **Given** `task.commit_type_by_label: { bug: fix }` and no `auto_merge` key in the configuration
 - **When** an item labelled `bug` is built
 - **Then** the front matter carries `commit_type: fix` and no `auto_merge` key; with `task.auto_merge: true` configured the key appears as `auto_merge: true`.
+- **Given** `task.task_type_by_label: { "flow:quick": quick_fix }` and `task.auto_merge_labels: [automerge]`
+- **When** an item labelled `worc`, `flow:quick` and `automerge` is built
+- **Then** the front matter carries `task_type: quick_fix` and `auto_merge: true`; an item with neither label carries the configured `task_type` and no `auto_merge` key; a triage task for the same item keeps the triage flow; and a configuration naming a label under `write_back.labels_prefix` in either key is refused at load.
 
 ### AC-7 — handoff only through the public ingress (FR-C7)
 

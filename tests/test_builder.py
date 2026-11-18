@@ -13,10 +13,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from support import connector_config, task_config, work_item
-from worc_connect.core import builder
+from support import connector_config, report_text, task_config, work_item
+from worc_connect.core import builder, triage
 from worc_connect.core.naming import BRANCH_MAX_LEN, allocate_branch, allocate_task_id, slugify
 from worc_connect.core.sanitize import TITLE_MAX_LEN, sanitize_title, truncate_body
+from worc_connect.core.triage import Verdict
 
 
 def front_matter(content: str) -> dict[str, object]:
@@ -227,6 +228,111 @@ def test_an_unmapped_label_leaves_the_configured_commit_type(clone: Path) -> Non
     fields = front_matter(builder.build(work_item(labels=("worc",)), config, seq=1).content)
 
     assert fields["commit_type"] == "feat"
+
+
+def test_a_label_can_choose_the_flow(clone: Path) -> None:
+    config = connector_config(
+        clone,
+        task=task_config(task_type="implementation", task_type_by_label={"flow:quick": "quick"}),
+    )
+
+    item = work_item(labels=("worc", "Flow:Quick"))
+    fields = front_matter(builder.build(item, config, seq=1).content)
+
+    assert fields["task_type"] == "quick"
+
+
+def test_an_unmapped_label_leaves_the_configured_flow(clone: Path) -> None:
+    config = connector_config(
+        clone,
+        task=task_config(task_type="implementation", task_type_by_label={"flow:quick": "quick"}),
+    )
+
+    fields = front_matter(builder.build(work_item(labels=("worc",)), config, seq=1).content)
+
+    assert fields["task_type"] == "implementation"
+
+
+def test_a_flow_label_alone_emits_the_key_and_no_label_emits_none(clone: Path) -> None:
+    # With no `task_type` configured worc's own default stands — unless a label chose a flow.
+    config = connector_config(clone, task=task_config(task_type_by_label={"flow:quick": "quick"}))
+
+    chosen = front_matter(builder.build(work_item(labels=("flow:quick",)), config, seq=1).content)
+    plain = front_matter(builder.build(work_item(labels=("worc",)), config, seq=1).content)
+
+    assert chosen["task_type"] == "quick"
+    assert "task_type" not in plain
+
+
+def test_the_items_own_label_order_decides_between_two_flows(clone: Path) -> None:
+    config = connector_config(
+        clone, task=task_config(task_type_by_label={"flow:docs": "docs", "flow:quick": "quick"})
+    )
+
+    first = work_item(labels=("flow:quick", "flow:docs"))
+    second = work_item(labels=("flow:docs", "flow:quick"))
+
+    assert front_matter(builder.build(first, config, seq=1).content)["task_type"] == "quick"
+    assert front_matter(builder.build(second, config, seq=1).content)["task_type"] == "docs"
+
+
+def test_an_auto_merge_label_turns_the_merge_on(clone: Path) -> None:
+    config = connector_config(clone, task=task_config(auto_merge_labels=("automerge",)))
+
+    item = work_item(labels=("worc", "AutoMerge"))
+    fields = front_matter(builder.build(item, config, seq=1).content)
+
+    assert fields["auto_merge"] is True
+
+
+def test_without_an_auto_merge_label_the_key_stays_absent(clone: Path) -> None:
+    config = connector_config(clone, task=task_config(auto_merge_labels=("automerge",)))
+
+    fields = front_matter(builder.build(work_item(labels=("worc",)), config, seq=1).content)
+
+    assert "auto_merge" not in fields
+
+
+def test_an_auto_merge_label_overrides_a_configured_false(clone: Path) -> None:
+    config = connector_config(
+        clone, task=task_config(auto_merge=False, auto_merge_labels=("automerge",))
+    )
+
+    opted_in = work_item(labels=("worc", "automerge"))
+    plain = work_item(labels=("worc",))
+
+    assert front_matter(builder.build(opted_in, config, seq=1).content)["auto_merge"] is True
+    assert front_matter(builder.build(plain, config, seq=1).content)["auto_merge"] is False
+
+
+def test_the_per_label_choices_reach_a_task_built_from_a_triage_report(clone: Path) -> None:
+    config = connector_config(
+        clone,
+        task=task_config(
+            task_type_by_label={"flow:quick": "quick"}, auto_merge_labels=("automerge",)
+        ),
+    )
+    report = triage.parse(report_text(Verdict.ACTIONABLE, reason="do it"))
+    assert report is not None
+
+    item = work_item(labels=("worc", "flow:quick", "automerge"))
+    fields = front_matter(builder.build_from_report(item, config, report, seq=2).content)
+
+    assert fields["task_type"] == "quick"
+    assert fields["auto_merge"] is True
+
+
+def test_the_triage_task_keeps_its_own_flow_whatever_the_flow_label(clone: Path) -> None:
+    config = connector_config(
+        clone,
+        research_flow="issue_triage",
+        task=task_config(task_type_by_label={"flow:quick": "quick"}),
+    )
+
+    item = work_item(labels=("worc", "flow:quick"))
+    fields = front_matter(builder.build_research(item, config, seq=1).content)
+
+    assert fields["task_type"] == "issue_triage"
 
 
 def test_a_follow_up_continues_the_previous_branch_instead_of_naming_a_new_one(clone: Path) -> None:

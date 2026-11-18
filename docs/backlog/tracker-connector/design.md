@@ -195,6 +195,7 @@ gate:
   allow_all: false # must be true, explicitly, to run with no rule at all
 task:
   task_type: implementation
+  # task_type_by_label: { "flow:quick": quick_fix }  # a label picks the flow for one item
   queue: default
   priority: mid
   commit_type: feat
@@ -202,6 +203,7 @@ task:
   branch_prefix: worc
   id_prefix: gh
   # auto_merge: false            # emitted only when set; worc's git.auto_merge otherwise decides
+  # auto_merge_labels: [automerge]  # per-item opt-in; only as safe as who can apply the label
 worc:
   command: worc # resolved with shutil.which
   repo_path: .
@@ -264,7 +266,7 @@ None in the connector. With triage on, the connector-shipped flow is an ordinary
 - **No credentials.** `gh` owns the token; the connector's state, log and task files carry none. The connector inherits the operator's environment and forwards nothing special to `gh` or `worc`.
 - **Cannot weaken worc.** Its only write into worc is a gated task file; a task cannot carry `extra_args`, a permission profile, or a flow edit, and `auto_merge` is a per-task field worc already lets the task author set. The connector never touches `.worc/`, `.git`, `config.yaml`, or a flow file except the triage flow it installs on explicit operator command.
 - **Argv only.** `gh` and `worc` are launched as argument lists; the executables are resolved with `shutil.which`, never through a shell.
-- **The auto-merge caveat is documented, not softened:** an issue-sourced task under `auto_merge: true` is where a prompt injection in an issue turns into merged code. The connector's `init` leaves `auto_merge` unset and its guide says why.
+- **The auto-merge caveat is documented, not softened:** an issue-sourced task under `auto_merge: true` is where a prompt injection in an issue turns into merged code. The connector's `init` leaves `auto_merge` unset and its guide says why. The per-item opt-in, `auto_merge_labels`, is also left unset, and its guide says that the label is the whole protection: an issue template or bot that applies it hands the merge to whoever opens the issue.
 
 ## Cross-platform
 

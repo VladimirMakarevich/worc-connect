@@ -280,26 +280,42 @@ def _dump(fields: dict[str, Any]) -> str:
 
 
 def _dispatch_fields(task: TaskConfig, labels: tuple[str, ...]) -> dict[str, Any]:
-    """The configured dispatch keys, with the per-label commit type applied where one matches."""
+    """The configured dispatch keys, with the per-label choices applied where a label matches."""
     configured = (
-        ("task_type", task.task_type),
+        ("task_type", _by_label(task.task_type_by_label, labels, default=task.task_type)),
         ("queue", task.queue),
         ("priority", task.priority),
-        ("commit_type", _commit_type(task, labels)),
-        ("auto_merge", task.auto_merge),
+        ("commit_type", _by_label(task.commit_type_by_label, labels, default=task.commit_type)),
+        ("auto_merge", _auto_merge(task, labels)),
     )
     return {key: value for key, value in configured if value is not None}
 
 
-def _commit_type(task: TaskConfig, labels: tuple[str, ...]) -> str | None:
-    """The commit type for an item: the first matching label's override, else the configured one.
+def _by_label(
+    overrides: dict[str, str], labels: tuple[str, ...], *, default: str | None
+) -> str | None:
+    """The first matching label's configured value, else ``default``.
 
     Item order decides, not mapping order, so the same item and the same configuration always
     produce the same task — and the operator can read the answer off the item's own label list.
+    The value always comes from the mapping, never from the label: a label only selects.
     """
-    overrides = {name.casefold(): value for name, value in task.commit_type_by_label.items()}
+    by_name = {name.casefold(): value for name, value in overrides.items()}
     for label in labels:
-        override = overrides.get(label.casefold())
+        override = by_name.get(label.casefold())
         if override is not None:
             return override
-    return task.commit_type
+    return default
+
+
+def _auto_merge(task: TaskConfig, labels: tuple[str, ...]) -> bool | None:
+    """``True`` when the item carries a configured auto-merge label, else the configured value.
+
+    A label can only turn the merge on: the safe shape is "off unless a maintainer opted this item
+    in", and an operator who set ``auto_merge: true`` for every task has already answered the
+    per-item question for all of them.
+    """
+    wanted = {name.casefold() for name in task.auto_merge_labels}
+    if any(label.casefold() in wanted for label in labels):
+        return True
+    return task.auto_merge

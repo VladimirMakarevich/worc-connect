@@ -32,6 +32,7 @@ from worc_connect.core.state import (
     META_LAST_TICK_AT,
     META_LAST_TICK_RESULT,
     META_WATERMARK,
+    SCHEMA_VERSION,
     ItemRow,
     StateStore,
 )
@@ -215,7 +216,15 @@ def _cmd_status(args: argparse.Namespace) -> int:
             f"result={store.meta(META_LAST_TICK_RESULT) or '-'}"
         )
         rows = store.rows()
-        if not rows:
+        if store.discarded_schema is not None:
+            # Not "no items": the file holds rows this build cannot read, and the first real tick
+            # replaces it — saying nothing ever happened would be wrong twice over.
+            print(
+                f"status: {home.state_path.as_posix()} was written by another build "
+                f"(cache schema {store.discarded_schema}, this build reads {SCHEMA_VERSION}); "
+                "the next real tick rebuilds it from the tracker and worc, and nothing is lost"
+            )
+        elif not rows:
             print("status: no items taken on yet")
         for row in rows:
             print(f"status: {_row_line(row)}")
@@ -360,6 +369,11 @@ def _label(config: ConnectorConfig, state: str | None) -> str:
     return "-" if state is None else f"{config.write_back.labels_prefix}{state}"
 
 
+def _flag(value: bool | None) -> str:
+    """A front-matter flag as a dry run prints it: ``-`` where the task would carry no key."""
+    return "-" if value is None else str(value).lower()
+
+
 def _reporter(config: ConnectorConfig, *, dry_run: bool) -> Callable[[TickReport], None]:
     """The per-tick printer: a plan an operator can act on for a dry run, a summary otherwise."""
 
@@ -378,7 +392,8 @@ def _reporter(config: ConnectorConfig, *, dry_run: bool) -> Callable[[TickReport
             print(
                 f"plan: item={planned.item_id} action={planned.action} "
                 f"reason={planned.reason} task={planned.task_id or '-'} "
-                f"branch={planned.branch or '-'} "
+                f"branch={planned.branch or '-'} task_type={planned.task_type or '-'} "
+                f"auto_merge={_flag(planned.auto_merge)} "
                 f"label={_label(config, planned.state)} url={planned.url}"
             )
         print(f"plan: watermark={tick.watermark.isoformat() if tick.watermark else '-'}")

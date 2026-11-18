@@ -7,7 +7,9 @@ made — is asserted against the recording of the fake ``gh`` rather than inferr
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import sqlite3
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -196,6 +198,37 @@ def test_a_dry_run_prints_the_plan_and_writes_nothing(
 
 @pytest.mark.slow
 @requires_installed_distribution
+def test_a_dry_run_shows_the_flow_and_the_merge_each_item_would_get(
+    home: ConnectorHome, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]
+) -> None:
+    document = base_config()
+    document["task"].update(
+        {
+            "task_type": "implementation",
+            "task_type_by_label": {"flow:skills": "implementation_skills"},
+            "auto_merge_labels": ["AutoMerge"],
+        }
+    )
+    write_config(home, document)
+    fake_gh.respond(
+        "issue list",
+        payload=[
+            issue_payload(work_item("37", labels=("worc", "automerge"))),
+            issue_payload(work_item("38", labels=("worc", "flow:skills"))),
+        ],
+    )
+
+    main(["watch", "--home", str(home.path), "--once", "--dry-run"])
+
+    lines = capsys.readouterr().out.splitlines()
+    first = next(line for line in lines if "item=37 " in line)
+    second = next(line for line in lines if "item=38 " in line)
+    assert "task_type=implementation auto_merge=true" in first
+    assert "task_type=implementation_skills auto_merge=-" in second
+
+
+@pytest.mark.slow
+@requires_installed_distribution
 def test_a_dry_run_repeats_a_stranger_s_text_nowhere(
     home: ConnectorHome, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -272,6 +305,33 @@ def test_status_reports_the_rows_the_watermark_and_the_last_tick(
     assert "watermark=2026-09-10T10:00:00+00:00" in out
     assert "result=ok listed=1 staged=1" in out
     assert "no items taken on yet" in out
+
+
+def test_status_on_a_cache_of_another_schema_says_so_instead_of_reporting_nothing(
+    home: ConnectorHome, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The second real run: a schema-4 cache holding three rows was reported as "no items taken on
+    # yet", which reads as "nothing ever happened".
+    write_config(home, base_config())
+    connection = sqlite3.connect(home.state_path)
+    connection.executescript(
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+        "INSERT INTO meta VALUES ('schema_version', '4');"
+        "CREATE TABLE items (item_id TEXT);"
+        "INSERT INTO items VALUES ('29'), ('37'), ('39');"
+    )
+    connection.commit()
+    connection.close()
+    before = home.state_path.read_bytes()
+
+    code = main(["status", "--home", str(home.path)])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "no items taken on yet" not in out
+    assert "cache schema 4" in out
+    assert "next real tick rebuilds it" in out
+    assert home.state_path.read_bytes() == before  # read-only, as ever
 
 
 def test_status_creates_no_database(home: ConnectorHome) -> None:
@@ -364,6 +424,37 @@ def test_a_copy_you_edited_is_left_alone_until_you_say_otherwise(
 
     assert forced == 0
     assert edited.read_text(encoding="utf-8") != "my own analysis prompt\n"
+
+
+def test_a_copy_an_earlier_release_installed_is_updated_without_force(
+    home: ConnectorHome,
+    fake_worc: FakeWorc,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Re-running the command is how an operator picks up a newer flow, so a prompt nobody edited
+    # since an earlier release installed it is not an edit and needs no `--force`.
+    install_config(home)
+    main(["install-flow", "--home", str(home.path)])
+    outdated = flows_dir(home) / "issue_triage" / "reproduction.md"
+    outdated.write_bytes(b"what an earlier release shipped\n")
+    earlier = hashlib.sha256(b"what an earlier release shipped\n").hexdigest()
+    monkeypatch.setitem(
+        flows._EARLIER_RELEASES, "issue_triage/reproduction.md", frozenset({earlier})
+    )
+    capsys.readouterr()
+
+    code = main(["install-flow", "--home", str(home.path)])
+
+    assert code == 0
+    assert outdated.read_bytes() == flows.packaged()["issue_triage/reproduction.md"]
+    assert "updated issue_triage/reproduction.md" in capsys.readouterr().out
+
+
+def test_no_earlier_release_hash_is_the_shipped_file_itself() -> None:
+    # A shipped file whose own hash were listed as "earlier" would be reported as an update forever.
+    for name, content in flows.packaged().items():
+        assert hashlib.sha256(content).hexdigest() not in flows._EARLIER_RELEASES.get(name, ())
 
 
 def test_install_flow_refuses_while_the_analysis_step_is_off(

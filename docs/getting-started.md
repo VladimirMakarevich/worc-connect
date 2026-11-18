@@ -46,6 +46,8 @@ worc-connect init --repo OWNER/REPO
 
 `watch` checks this before every tick, dry run included: if no `.gitignore` from the clone's root down to the home's directory names the home exactly (`.worc-connect/`, `/.worc-connect/`, `**/.worc-connect/` and the like, without leading spaces — read as text, since the connector never runs `git`), the tick is refused with exit code `1` and `action=guard result=skipped-HomeNotIgnored`, and no tracker call is made. Put the line back and commit it; a running daemon resumes on its next tick. A line in `.git/info/exclude` or a global excludes file does not count — the connector does not read git's own files — so the line belongs in the tracked `.gitignore`.
 
+**Keep the home out of your project's own tools too.** `.gitignore` is what git reads; a linter, a test runner or a formatter may read only its own ignore list — ESLint's flat config, for one, does not read `.gitignore`. With the [triage step](triage.md) on, the home holds scratch files the triage task wrote while reproducing an issue, and a tool that picks them up fails every later task's checks on code that is not the project's. Add `.worc-connect/` to those tools' ignores, next to `.worc/`, and commit that as well.
+
 **Check:** `.worc-connect/config.yaml` exists, `git status` shows the connector's home is ignored, and `.gitignore` is not listed as modified.
 
 ## Step 3 — decide who may trigger a run
@@ -90,12 +92,12 @@ You get one `plan:` line per item the tick saw:
 ```text
 dry run: nothing is written — no task file, no state row, no tracker call
 plan: repo=OWNER/REPO tracker=github listed=3 followed=0 gated=1 following=0
-plan: item=142 action=stage-task reason=trigger-label task=gh-142 branch=worc/gh-142-signup-form-rejects-valid-emails label=worc:queued url=https://github.com/OWNER/REPO/issues/142
-plan: item=143 action=skip reason=no-trigger-label task=- branch=- label=- url=https://github.com/OWNER/REPO/issues/143
+plan: item=142 action=stage-task reason=trigger-label task=gh-142 branch=worc/gh-142-signup-form-rejects-valid-emails task_type=implementation auto_merge=- label=worc:queued url=https://github.com/OWNER/REPO/issues/142
+plan: item=143 action=skip reason=no-trigger-label task=- branch=- task_type=- auto_merge=- label=- url=https://github.com/OWNER/REPO/issues/143
 plan: watermark=-
 ```
 
-Read it as: `action` is what the tick decided — `stage-task` (this becomes a worc task), `follow` (a task already exists and is being tracked), `skip` (nothing to do) — and `reason` is why, in a fixed vocabulary that never carries text an item wrote: `trigger-label`, `allowed-author`, `allow-all`, `no-trigger-label`, `author-not-allowed`.
+Read it as: `action` is what the tick decided — `stage-task` (this becomes a worc task), `follow` (a task already exists and is being tracked), `skip` (nothing to do) — and `reason` is why, in a fixed vocabulary that never carries text an item wrote: `trigger-label`, `allowed-author`, `allow-all`, `no-trigger-label`, `author-not-allowed`. On a `stage-task` line, `task_type` and `auto_merge` are what the task would carry — the values from your configuration that the issue's labels selected (`task_type_by_label`, `auto_merge_labels`), `-` where the task would carry no such key and worc's default stands. With the [triage step](triage.md) on they describe the triage task this tick would queue, which never carries `auto_merge`; the implementation task's choices are made from the same labels when the report comes back.
 
 Run it as often as you like, editing the configuration in between, until the plan says what you expect. A configuration problem stops it here with exit code `2` and a message naming the key — before any tracker call is made.
 
@@ -108,6 +110,8 @@ Pick one small, well-described issue. Apply the trigger label (`worc` by default
 If the label does not exist in the repository yet, you have two choices: create it in the GitHub UI, or run one real tick (step 7) — the connector creates the labels the repository is missing, both its own state labels and the trigger labels your gate names, on the first tick of a process. It never edits a label that already exists.
 
 **Check:** `worc-connect watch --once --dry-run` now shows that issue with `action=stage-task reason=trigger-label` and prints the task id and branch it would use.
+
+If the issue is missing from the plan right after you labelled or created it, wait a minute and run the dry run again. The connector lists issues through GitHub's search (that is what lets it ask only for what changed since its last tick), and the search index lags a fresh change by up to a minute or so — an issue it has not indexed yet is simply not listed, which reads like "the gate did not admit it". A real tick recovers by itself: each listing reaches ten minutes behind the last one.
 
 ## Step 7 — the first real tick
 

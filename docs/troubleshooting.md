@@ -86,7 +86,7 @@ See [triage](triage.md) for what the step does and what it costs.
 
 - **Delete `.worc-connect/state.db`** — it is a cache. The next tick rebuilds every row from the tracker, `worc list` and the lifecycle folders. Safe at any time.
 - **Re-run an item from scratch** — remove the trigger label and put it back once its task has nothing left in flight. That is a new attempt with the next sequence suffix (`gh-142.2`); an id is never reused. A label cycled _while the task runs_ is treated as a correction and starts nothing.
-- **A failed task** is recovered on the host with `worc status <task-id>` and `worc rerun` — never by the connector, which will not re-queue or edit a task on its own.
+- **A failed task** is recovered on the host with `worc status <task-id>` and `worc rerun` — never by the connector, which will not re-queue or edit a task on its own. It does follow the rerun for seven days after the failure, so the issue moves on by itself; a rerun later than that leaves `worc:failed` on the issue until you change the label by hand.
 - **A wrong label published** can be removed or changed by hand; the connector reads the issue's state back before every write and adopts what it finds rather than fighting it.
 
 If none of this explains it, the log is the record of what the connector actually did — every action, with the item id, the task id and the result. Day-to-day running is covered by the operations guide.

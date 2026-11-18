@@ -358,6 +358,35 @@ def test_the_state_prefix_check_follows_the_configured_prefix(home: ConnectorHom
         load(write_config(home, document))
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("auto_merge_labels", ["worc"]),
+        ("auto_merge_labels", ["WORC"]),  # C-15 in the second real run: accepted, exit 0
+        ("task_type_by_label", {"Worc": "implementation_skills"}),
+    ],
+)
+def test_a_trigger_label_is_refused_as_a_per_item_choice(
+    home: ConnectorHome, key: str, value: object
+) -> None:
+    # Every gated item carries the trigger label, so as an auto-merge label it would merge every
+    # task with nobody in between — the opposite of the per-item opt-in the key reads as.
+    document = base_config()
+    document["task"][key] = value
+    path = write_config(home, document)
+
+    with pytest.raises(ConfigError, match=r"also a `gate\.labels` trigger label"):
+        load(path)
+
+
+def test_a_label_that_is_not_a_trigger_is_still_a_per_item_choice(home: ConnectorHome) -> None:
+    document = base_config()
+    document["gate"]["labels"] = ["worc", "worc-later"]
+    document["task"]["auto_merge_labels"] = ["automerge"]
+
+    assert load(write_config(home, document)).task.auto_merge_labels == ("automerge",)
+
+
 def test_a_section_that_is_not_a_mapping_is_refused(home: ConnectorHome) -> None:
     document = base_config()
     document["gate"] = ["worc"]

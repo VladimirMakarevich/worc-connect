@@ -48,7 +48,7 @@ worc-connect status
 
 Prints the repository and home it is using, the poll watermark, how the last tick ended, and one line per item it has taken on — identifiers, phase, task id, branch and pull request, and nothing an item wrote. It opens the database read-only, so it cannot create or change anything.
 
-`.worc-connect/connect.log` is the running account: one line per action, `item=… task=… action=… result=…`. A followed item gets one line per tick, `action=follow result=<phase>`, with worc's own status for the task, whole and quoted, as `worc="…"` when it has one — `result=running worc="parked (no daemon)"` means worc holds the task but no daemon is running it, and `worc="running (paused …)"` that it is paused. It carries ids and URLs only — never issue text, never a diff, never anything read out of worc's home. It rotates at 5 MB with three older files kept, so a daemon on a busy repository never grows it without end.
+`.worc-connect/connect.log` is the running account: one line per action, `item=… task=… action=… result=…`. A followed item gets one line per tick, `action=follow result=<phase>`, with worc's own status for the task, whole and quoted, as `worc="…"` when worc was asked about it on that tick (a status the connector remembers from an earlier tick is never printed as worc's answer) — `result=running worc="parked (no daemon)"` means worc holds the task but no daemon is running it, and `worc="running (paused …)"` that it is paused. It carries ids and URLs only — never issue text, never a diff, never anything read out of worc's home. It rotates at 5 MB with three older files kept, so a daemon on a busy repository never grows it without end.
 
 Lines worth recognising:
 
@@ -61,6 +61,9 @@ Lines worth recognising:
 | `action=fetch result=skipped-…` | One in-flight item could not be read by identifier this tick; its row waits a tick. |
 | `result=state-label-without-task` | An issue carries a connector state label with no worc task behind it. It is left alone — remove the label to let the connector take that issue on. |
 | `action=promote result=…` | The handoff into worc, per task. |
+| `action=close result=merged` | The connector closed the issue after its pull request merged. `result=already-closed` means the code host had closed it first (`Fixes #<n>`); the closing comment was posted either way. |
+| `action=follow result=rerun` | worc took a failed task back — an operator's `worc rerun` — and the issue follows it again. |
+| `action=triage-cleanup result=left-<n>` | `<n>` files a finished triage task left beside its report could not be removed (a scanner holding one open, say). Nothing else is affected; delete them by hand if a project tool trips on them. |
 
 ## Running against more than one repository
 
@@ -75,7 +78,7 @@ Every command takes `--home`. Each home has its own configuration, cache, log an
 
 ## When a task fails
 
-`worc:failed` on an issue means one of three things, and the comment says which: worc ended the task without opening a pull request, the pull request was closed without being merged, or worc's validation gate refused the task outright.
+`worc:failed` on an issue means one of three things, and the comment says which: worc ended the task without opening a pull request, the pull request was closed without being merged (the comment links it), or worc's validation gate refused the task outright.
 
 **The recovery is yours and it happens on the host.** The connector never re-queues, edits or reruns a task on its own, and it never copies worc's logs or diffs onto a public issue.
 
@@ -84,11 +87,13 @@ worc status <task-id>     # what worc recorded — the logs stay on the host
 worc rerun <task-id>      # if it is worth another attempt
 ```
 
+**The connector follows the rerun.** For seven days after worc reported the failure (`failed` or `manual_action_required`), every tick asks `worc list` about the task — one launch per tick for all such tasks together, and no tracker call. Once worc lists it as queued, running or done again, the connector reads the issue by number and takes it from there: `worc:in-progress`, then the pull request, then `worc:done` — the issue included when GitHub already closed it through `Fixes #<n>`, as it does when worc merges the rerun's pull request itself. The log says `action=follow result=rerun` for the tick that noticed. A rerun later than seven days after the failure is not seen; put the right state label on the issue by hand, or start over from the issue as below. A refused task, a vanished one and a pull request closed unmerged are not watched this way — a rerun does not undo them, and a closed pull request comes back by being reopened.
+
 If the run needs to start over from the issue instead, take the trigger label off and put it back once the task has nothing left in flight. That arms and then fires a fresh attempt, which gets the next sequence suffix (`gh-142.2`) — an id is never reused. A pull request closed unmerged and then reopened needs nothing at all: the next tick recomputes the state from the request itself and the issue returns to `worc:pr-open`.
 
 ## Upgrades and moving parts
 
-**Upgrading the connector.** Stop the watcher, upgrade, start it again. A `state.db` written by a schema the new build does not recognise is discarded rather than migrated — rebuilding it costs one tick.
+**Upgrading the connector.** Stop the watcher, upgrade, start it again. A `state.db` written by a schema the new build does not recognise is discarded rather than migrated — rebuilding it costs one tick. Until that tick, `status` says the cache belongs to another build instead of listing its rows. After an upgrade that changed the triage flow, run `worc-connect install-flow` once: copies you never edited are updated, and copies you edited are reported and left alone.
 
 **Upgrading worc.** The connector asks `worc --version` once per run and adapts. Crossing 0.14.0a1 upward gains you three things with no configuration change: `Fixes #<n>` in the pull request body, the pull request found by the URL worc recorded rather than by branch name, and the reason behind a refused task reported on the issue.
 

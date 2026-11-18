@@ -31,9 +31,11 @@ from worc_connect.config import (
     WriteBackConfig,
 )
 from worc_connect.core.items import (
+    ItemHeadline,
     ItemState,
     PullRequest,
     PullRequestState,
+    Reply,
     WorkItem,
     WorkItemState,
 )
@@ -478,7 +480,7 @@ def connector_config(
 
 
 @dataclass
-class StubAdapter:
+class _StubReads:
     """A second tracker adapter, in the tests only, that no GitHub code path runs through.
 
     Its existence is the proof the core asked for: a full tick drives this object through the same
@@ -509,7 +511,7 @@ class StubAdapter:
     fetched: list[str] = field(default_factory=list)
     states: list[tuple[str, str, str | None]] = field(default_factory=list)
     comments: list[tuple[str, str]] = field(default_factory=list)
-    closed: list[tuple[str, str]] = field(default_factory=list)
+    closed: list[str] = field(default_factory=list)
     ensured: list[tuple[ItemState, ...]] = field(default_factory=list)
     ensured_triggers: list[tuple[str, ...]] = field(default_factory=list)
     found_by_branch: list[str] = field(default_factory=list)
@@ -518,6 +520,12 @@ class StubAdapter:
     # The tracker's own closing keyword; `None` stands for an adapter whose tracker has none, which
     # is a case the builder has to handle without a per-tracker branch.
     closing_keyword: str | None = "Fixes"
+    # The comments a reporter posted, for the replies a triage run started by their answer reads;
+    # and every `since` the connector asked them for.
+    posted: list[Reply] = field(default_factory=list)
+    replies_since: list[tuple[str, datetime]] = field(default_factory=list)
+    # How many times the repository's open items were listed for a triage run.
+    open_listed: int = 0
     _last_stamp: datetime | None = None
 
     def list_items(self, since: datetime | None) -> list[WorkItem]:
@@ -541,6 +549,21 @@ class StubAdapter:
             if item.identifier == identifier:
                 return item
         raise TrackerUnavailable(f"no item {identifier}")
+
+    def replies(self, identifier: str, *, since: datetime) -> list[Reply]:
+        self.replies_since.append((identifier, since))
+        return sorted(
+            (reply for reply in self.posted if reply.created_at > since),
+            key=lambda reply: reply.created_at,
+        )
+
+    def open_items(self) -> list[ItemHeadline]:
+        self.open_listed += 1
+        return [
+            ItemHeadline(identifier=item.identifier, title=item.title)
+            for item in reversed(self.items)
+            if item.state is WorkItemState.OPEN
+        ]
 
     def find_pull_request(self, branch: str, *, url: str | None = None) -> PullRequest | None:
         if url is not None:
@@ -569,6 +592,15 @@ class StubAdapter:
                     return ItemState(name)
         return None
 
+    @staticmethod
+    def _number_in(url: str) -> int:
+        return int(url.rstrip("/").rsplit("/", 1)[-1])
+
+
+@dataclass
+class StubAdapter(_StubReads):
+    """The stub's writes, on top of its reads: one class per direction, as the protocol has."""
+
     def set_state(self, identifier: str, state: ItemState, *, previous: ItemState | None) -> None:
         self.states.append((identifier, str(state), None if previous is None else str(previous)))
         self._touch(identifier, state=state)
@@ -579,8 +611,8 @@ class StubAdapter:
         self.comments.append((identifier, body_path.read_text(encoding="utf-8")))
         self._touch(identifier)
 
-    def close(self, identifier: str, message: str) -> None:
-        self.closed.append((identifier, message))
+    def close(self, identifier: str) -> None:
+        self.closed.append(identifier)
         # A closed item leaves the open listing but stays readable by identifier, exactly as on a
         # real tracker: that is what keeps a merged, closed item from being re-triggered on the very
         # next tick, while a task still in flight on an item somebody closed by hand is followed.
@@ -589,10 +621,6 @@ class StubAdapter:
     def ensure_labels(self, states: tuple[ItemState, ...], *, triggers: tuple[str, ...]) -> None:
         self.ensured.append(states)
         self.ensured_triggers.append(triggers)
-
-    @staticmethod
-    def _number_in(url: str) -> int:
-        return int(url.rstrip("/").rsplit("/", 1)[-1])
 
     def _touch(
         self, identifier: str, *, state: ItemState | None = None, closed: bool = False

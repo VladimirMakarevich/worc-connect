@@ -21,7 +21,11 @@ is no fallback path, because a fallback is how a connector ends up reading worc'
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -61,9 +65,10 @@ class Verdict(StrEnum):
 class FailingTest:
     """A reproduction the triage run arrived at, as text rather than as a file in the tree.
 
-    The reproduction node writes only inside the report directory, so the test cannot be left
-    behind in the clone and no branch is pushed. Carrying it as text is what lets the builder —
-    not the agent — decide whether it reaches the implementation task and under which heading.
+    The reproduction node writes only inside the report directory, which git ignores and the
+    connector clears once the report is read, so the test cannot be left behind in the clone.
+    Carrying it as text is what lets the builder — not the agent — decide whether it reaches the
+    implementation task and under which heading.
     """
 
     path: str | None
@@ -110,6 +115,62 @@ def mark_triage_task(home_path: Path, task_id: str) -> None:
 def is_triage_task(home_path: Path, task_id: str) -> bool:
     """Whether ``task_id`` is a triage task: it owns a directory under the triage home."""
     return report_path(home_path, task_id).parent.is_dir()
+
+
+def clear_scratch(home_path: Path, task_id: str) -> int:
+    """Remove everything ``task_id`` left in its directory except the report; returns the misses.
+
+    The reproduction node writes real source files into the report directory — a test, a runner
+    configuration, a runner's cache — and the directory is inside the clone, so a project tool that
+    does not read ``.gitignore`` (a linter, a test runner) picks them up as the project's own and
+    fails every later task on them. Once the connector has what it needs, the report, the rest goes.
+
+    The directory itself stays: it is the one signal a rebuilt row has that the id is a triage
+    task's. Nothing outside it is touched — a link the agent left is removed as a link and never
+    followed. An entry that cannot be removed is counted rather than raised: this is housekeeping,
+    and a file a scanner still holds open must not stop a tick that has real work to do.
+    """
+    if not task_id:
+        return 0  # an empty id names the triage home itself, every other task's report included
+    directory = report_path(home_path, task_id).parent
+    if directory.is_symlink() or not directory.is_dir():
+        return 0
+    misses = 0
+    for entry in directory.iterdir():
+        if entry.name == REPORT_FILENAME:
+            continue
+        try:
+            _remove(entry)
+        except OSError:
+            misses += 1
+    return misses
+
+
+def _remove(entry: Path) -> None:
+    """Remove one entry of a report directory without ever following a link out of it."""
+    if entry.is_symlink() or entry.is_junction():
+        # A link is removed as a link. `rmdir` is what removes a directory link on Windows, where
+        # `unlink` refuses one; on POSIX every link is a file and `unlink` is the call.
+        (os.rmdir if entry.is_dir() and os.name == "nt" else os.unlink)(entry)
+    elif entry.is_dir():
+        shutil.rmtree(entry, onexc=_retry_writable)
+    else:
+        try:
+            entry.unlink()
+        except PermissionError:
+            _retry_writable(os.unlink, str(entry), None)
+
+
+def _retry_writable(
+    function: Callable[[str], object], path: str, _error: BaseException | None
+) -> None:
+    """The second attempt at a removal Windows refused because the file is read-only.
+
+    Test runners' caches are written read-only on Windows, where ``unlink`` then fails although the
+    directory is the caller's to clean; POSIX never takes this path.
+    """
+    Path(path).chmod(stat.S_IWRITE | stat.S_IREAD)
+    function(path)
 
 
 def read(home_path: Path, task_id: str) -> Report | None:

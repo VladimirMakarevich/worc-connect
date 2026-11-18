@@ -91,7 +91,7 @@ def test_an_item_walks_from_queued_to_a_closed_issue(
     row = row_of(store)
     assert (row.phase, row.pr_merged) == (Phase.DONE, True)
     assert adapter.states[-1][1] == "done"
-    assert adapter.closed[0][0] == "142"
+    assert adapter.closed == ["142"]
 
 
 def test_the_pull_request_is_found_once_and_read_by_number_afterwards(
@@ -167,7 +167,7 @@ def test_the_owners_edits_and_squash_merge_still_close_the_item(
 
     assert len(adapter.found_by_branch) == found
     assert row_of(store).phase is Phase.DONE
-    assert adapter.closed[0][0] == "142"
+    assert adapter.closed == ["142"]
 
 
 def test_a_task_worc_failed_is_reported_on_the_item(

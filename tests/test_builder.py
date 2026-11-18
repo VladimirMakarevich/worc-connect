@@ -335,6 +335,32 @@ def test_the_triage_task_keeps_its_own_flow_whatever_the_flow_label(clone: Path)
     assert fields["task_type"] == "issue_triage"
 
 
+def test_the_triage_task_carries_no_merge_and_no_commit_type_whatever_the_labels(
+    clone: Path,
+) -> None:
+    # The second real run: an item labelled `automerge` and `bug` queued a triage task carrying
+    # `auto_merge: true` and `commit_type: fix` — flags for a change the triage task never makes.
+    config = connector_config(
+        clone,
+        task=task_config(
+            commit_type="feat",
+            commit_type_by_label={"bug": "fix"},
+            auto_merge=True,
+            auto_merge_labels=("AutoMerge",),
+        ),
+    )
+    item = work_item(labels=("worc", "automerge", "bug"))
+
+    triage_fields = front_matter(builder.build_research(item, config, seq=1).content)
+    implementation = front_matter(builder.build(item, config, seq=2).content)
+
+    assert "auto_merge" not in triage_fields
+    assert "commit_type" not in triage_fields
+    assert (triage_fields["task_type"], triage_fields["priority"]) == ("issue_triage", "high")
+    # The implementation task still gets every choice the labels made.
+    assert (implementation["auto_merge"], implementation["commit_type"]) == (True, "fix")
+
+
 def test_a_follow_up_continues_the_previous_branch_instead_of_naming_a_new_one(clone: Path) -> None:
     config = connector_config(clone)
 

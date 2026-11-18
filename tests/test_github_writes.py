@@ -80,15 +80,17 @@ def test_a_comment_body_travels_as_a_file(fake_gh: FakeGh, tmp_path: Path) -> No
     assert "Queued" not in " ".join(call)
 
 
-def test_closing_carries_a_connector_written_message(fake_gh: FakeGh) -> None:
+def test_closing_carries_no_text_of_its_own(fake_gh: FakeGh) -> None:
+    # The closing message is a comment posted through a body file before the close: `gh` posts no
+    # `--comment` at all on an issue the code host already closed, which is exactly the case a
+    # pull request carrying `Fixes #<n>` produces.
     fake_gh.respond("issue close", stdout="")
 
-    adapter().close("142", "Closed by the merged pull request of worc task `gh-142`.")
+    adapter().close("142")
 
     call = fake_gh.calls_for("issue close")[0]
     assert call[:3] == ["issue", "close", "142"]
-    assert call[3] == "--comment"
-    assert "gh-142" in call[4]
+    assert "--comment" not in call
 
 
 def test_only_the_missing_labels_are_created_the_trigger_label_included(fake_gh: FakeGh) -> None:

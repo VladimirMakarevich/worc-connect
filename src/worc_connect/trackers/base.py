@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from worc_connect.core.items import ItemState, PullRequest, WorkItem
+from worc_connect.core.items import ItemHeadline, ItemState, PullRequest, Reply, WorkItem
 
 
 class TrackerError(Exception):
@@ -45,9 +45,8 @@ class TrackerRateLimited(TrackerError):
     """The tracker is throttling this operator; the next tick is the retry."""
 
 
-@runtime_checkable
-class TrackerAdapter(Protocol):
-    """One tracker, reduced to the reads the core performs on it.
+class TrackerReads(Protocol):
+    """What the core reads from a tracker: items, their replies, pull requests, and the vocabulary.
 
     Implementations translate their tracker into :class:`~worc_connect.core.items.WorkItem` and
     :class:`~worc_connect.core.items.PullRequest` records and raise :class:`TrackerError` (one of
@@ -69,6 +68,25 @@ class TrackerAdapter(Protocol):
 
         Used where the listing cannot answer — an item that has dropped out of the open listing but
         still carries a live task. Raises :class:`TrackerUnavailable` when the item does not exist.
+        """
+        ...
+
+    def replies(self, identifier: str, *, since: datetime) -> list[Reply]:
+        """The comments posted on the item strictly after ``since``, oldest first.
+
+        Asked for once, when the reporter's answer to a triage question starts the next triage run:
+        ``since`` is the stamp the question itself left on the item, so the connector's own comment
+        is never among them whoever posted it — the operator's login writes both. The bodies are
+        untrusted text and go into the task file only.
+        """
+        ...
+
+    def open_items(self) -> list[ItemHeadline]:
+        """The repository's open items by identifier and title, most recent first, capped.
+
+        What a triage run is shown so it can recognise a duplicate of an item still open. One call
+        per tick at most, and only on a tick that builds a triage task. The titles are untrusted
+        text and go into the task file only.
         """
         ...
 
@@ -101,6 +119,24 @@ class TrackerAdapter(Protocol):
         """
         ...
 
+    def closing_reference(self, item: WorkItem) -> str | None:
+        """The line that makes this tracker close ``item`` when the pull request merges.
+
+        It travels in the task's ``references``, which worc appends verbatim to the pull-request
+        body without interpreting it: the keyword is the adapter's knowledge — GitHub's ``Fixes
+        #<n>``, another host's own spelling — and worc learns none of them. An adapter whose
+        tracker has no such keyword returns ``None``, and the task then carries no reference.
+        """
+        ...
+
+
+class TrackerWrites(Protocol):
+    """What the core writes to a tracker: one state label, a comment from a file, the close.
+
+    Every write is an action on one item, by its identifier, with values the connector authored —
+    a state from its own vocabulary, a body file it rendered, a label name from configuration.
+    """
+
     def set_state(self, identifier: str, state: ItemState, *, previous: ItemState | None) -> None:
         """Put ``state`` on the item and take ``previous`` off, leaving exactly one in place."""
         ...
@@ -114,8 +150,8 @@ class TrackerAdapter(Protocol):
         """
         ...
 
-    def close(self, identifier: str, message: str) -> None:
-        """Close the item with ``message``, which is a connector-authored template."""
+    def close(self, identifier: str) -> None:
+        """Close the item, saying nothing: what the item is told travels as a comment first."""
         ...
 
     def ensure_labels(self, states: tuple[ItemState, ...], *, triggers: tuple[str, ...]) -> None:
@@ -129,15 +165,15 @@ class TrackerAdapter(Protocol):
         """
         ...
 
-    def closing_reference(self, item: WorkItem) -> str | None:
-        """The line that makes this tracker close ``item`` when the pull request merges.
 
-        It travels in the task's ``references``, which worc appends verbatim to the pull-request
-        body without interpreting it: the keyword is the adapter's knowledge — GitHub's ``Fixes
-        #<n>``, another host's own spelling — and worc learns none of them. An adapter whose
-        tracker has no such keyword returns ``None``, and the task then carries no reference.
-        """
-        ...
+@runtime_checkable
+class TrackerAdapter(TrackerReads, TrackerWrites, Protocol):
+    """One tracker, reduced to the reads and the writes the core performs on it.
+
+    Two halves rather than one list because they are two directions of one mapping: the reads
+    turn the tracker into the normalized records, the writes publish the connector's state onto
+    it. An adapter implements both; the core holds the one object.
+    """
 
 
 class AdapterFactory(Protocol):

@@ -24,7 +24,9 @@ class PlannedAction:
     """One item's outcome for this tick: what was decided and the reason it is reported under.
 
     Carries the item's identifier and URL and nothing else the item wrote — a plan an operator reads
-    on a terminal is not a place for a stranger's text.
+    on a terminal is not a place for a stranger's text. ``task_type`` and ``auto_merge`` are what a
+    task about to be staged would carry: values from the configuration that the item's labels can
+    only select, so a dry run shows the per-item choices before anything is written.
     """
 
     item_id: str
@@ -34,6 +36,8 @@ class PlannedAction:
     task_id: str | None = None
     branch: str | None = None
     state: str | None = None
+    task_type: str | None = None
+    auto_merge: bool | None = None
 
 
 @dataclass(frozen=True)

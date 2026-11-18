@@ -20,7 +20,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final, Self
 
-SCHEMA_VERSION: Final = 5
+SCHEMA_VERSION: Final = 6
 
 _META_SCHEMA_VERSION: Final = "schema_version"
 
@@ -49,6 +49,8 @@ CREATE TABLE items (
     pr_merged         INTEGER NOT NULL DEFAULT 0,
     retrigger_armed   INTEGER NOT NULL DEFAULT 0,
     queued_announced  INTEGER NOT NULL DEFAULT 0,
+    pr_announced      INTEGER NOT NULL DEFAULT 0,
+    continued_pr      INTEGER,
     created_at        TEXT    NOT NULL,
     updated_at        TEXT    NOT NULL,
     PRIMARY KEY (tracker, item_id, seq)
@@ -145,6 +147,13 @@ class ItemRow:
     # on the next tick instead of being forgotten, while a task worc reports pending again after
     # running is never announced twice.
     queued_announced: bool = False
+    # Whether the item has been told this attempt's pull request — its link. Keyed on the row rather
+    # than on a move into `pr-open`, so a request reopened after a close is not announced twice, and
+    # one worc merged before any tick saw it open still gets its link when the row reaches `done`.
+    pr_announced: bool = False
+    # The pull request this attempt continues, when it is a follow-up on one still open: the item
+    # is then told the task added to that request rather than that it opened another one.
+    continued_pr: int | None = None
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -190,6 +199,8 @@ def _row(record: sqlite3.Row) -> ItemRow:
         pr_merged=bool(record["pr_merged"]),
         retrigger_armed=bool(record["retrigger_armed"]),
         queued_announced=bool(record["queued_announced"]),
+        pr_announced=bool(record["pr_announced"]),
+        continued_pr=record["continued_pr"],
     )
 
 
@@ -203,6 +214,9 @@ class StateStore:
     """
 
     def __init__(self, path: Path, *, _connection: sqlite3.Connection | None = None) -> None:
+        # The schema version a read-only store found on disk and set aside, for a reader that has to
+        # tell "nothing was ever recorded" from "what was recorded belongs to another build".
+        self.discarded_schema: str | None = None
         self._read_only = _connection is not None
         if _connection is not None:
             self._connection = _connection
@@ -218,16 +232,23 @@ class StateStore:
 
         A database that does not exist yet, or one written by another schema, is answered from an
         empty in-memory copy: a dry run may not create the file, and inventing rows would be worse
-        than reporting none, since the caller is about to print a plan and change nothing.
+        than reporting none, since the caller is about to print a plan and change nothing. A file
+        set aside for its schema says so in :attr:`discarded_schema`, so ``status`` does not report
+        a cache it could not read as one with nothing in it.
         """
-        connection = sqlite3.connect(path) if path.is_file() else sqlite3.connect(":memory:")
+        exists = path.is_file()
+        connection = sqlite3.connect(path) if exists else sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
+        discarded = None
         if not _schema_is_current(connection):
+            discarded = _stored_schema(connection) if exists else None
             connection.close()
             connection = sqlite3.connect(":memory:")
             connection.row_factory = sqlite3.Row
             connection.executescript(_SCHEMA)
-        return cls(path, _connection=connection)
+        store = cls(path, _connection=connection)
+        store.discarded_schema = discarded
+        return store
 
     def close(self) -> None:
         """Close the connection; a closed store is not reused."""
@@ -240,15 +261,21 @@ class StateStore:
         )
         return [_row(record) for record in cursor.fetchall()]
 
-    def latest_row(self, tracker: str, item_id: str) -> ItemRow | None:
+    def latest_row(
+        self, tracker: str, item_id: str, *, before: int | None = None
+    ) -> ItemRow | None:
         """The item's highest-sequence row, or ``None`` if the item has never been seen.
 
         The highest sequence is the live one: a re-trigger adds a row rather than editing the
-        previous attempt, so the history of an item stays readable after the fact.
+        previous attempt, so the history of an item stays readable after the fact. ``before``
+        asks for the attempt that preceded sequence ``before`` instead — what a new attempt was
+        started from.
         """
+        ceiling = before if before is not None else 2**62
         cursor = self._connection.execute(
-            "SELECT * FROM items WHERE tracker = ? AND item_id = ? ORDER BY seq DESC LIMIT 1",
-            (tracker, item_id),
+            "SELECT * FROM items WHERE tracker = ? AND item_id = ? AND seq < ? "
+            "ORDER BY seq DESC LIMIT 1",
+            (tracker, item_id, ceiling),
         )
         record = cursor.fetchone()
         return None if record is None else _row(record)
@@ -261,6 +288,18 @@ class StateStore:
         moves past it while its row still has somewhere to go. Only the highest sequence counts —
         an earlier attempt a follow-up left at ``pr-open`` is history, not a task to follow.
         """
+        return [row for row in self._current_rows(tracker) if row.phase not in TERMINAL_PHASES]
+
+    def failed_rows(self, tracker: str) -> list[ItemRow]:
+        """Each item's current row that ended ``failed``, oldest sighting first.
+
+        The rows an operator's ``worc rerun`` can bring back to life: the reconcile decides which of
+        them are worth asking worc about, and only for those is the item read by identifier.
+        """
+        return [row for row in self._current_rows(tracker) if row.phase is Phase.FAILED]
+
+    def _current_rows(self, tracker: str) -> list[ItemRow]:
+        """Each item's highest-sequence row — the live attempt — oldest sighting first."""
         cursor = self._connection.execute(
             """
             SELECT * FROM items AS live
@@ -273,8 +312,7 @@ class StateStore:
             """,
             (tracker,),
         )
-        current = (_row(record) for record in cursor.fetchall())
-        return [row for row in current if row.phase not in TERMINAL_PHASES]
+        return [_row(record) for record in cursor.fetchall()]
 
     def save(self, row: ItemRow) -> None:
         """Insert ``row``, or update the one with the same tracker, item and sequence.
@@ -290,8 +328,8 @@ class StateStore:
                 tracker, item_id, seq, task_id, branch, phase, item_updated_at, last_status,
                 validation_reason, stage, research_task_id, research_note,
                 pr_number, pr_url, pr_merged, retrigger_armed, queued_announced,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                pr_announced, continued_pr, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(tracker, item_id, seq) DO UPDATE SET
                 task_id = excluded.task_id,
                 branch = excluded.branch,
@@ -307,6 +345,8 @@ class StateStore:
                 pr_merged = excluded.pr_merged,
                 retrigger_armed = excluded.retrigger_armed,
                 queued_announced = excluded.queued_announced,
+                pr_announced = excluded.pr_announced,
+                continued_pr = excluded.continued_pr,
                 updated_at = excluded.updated_at
             """,
             (
@@ -327,6 +367,8 @@ class StateStore:
                 int(row.pr_merged),
                 int(row.retrigger_armed),
                 int(row.queued_announced),
+                int(row.pr_announced),
+                row.continued_pr,
                 _iso(row.created_at),
                 _iso(row.updated_at),
             ),
@@ -381,6 +423,16 @@ def _schema_is_current(connection: sqlite3.Connection) -> bool:
         return False
     record = cursor.fetchone()
     return record is not None and str(record["value"]) == str(SCHEMA_VERSION)
+
+
+def _stored_schema(connection: sqlite3.Connection) -> str:
+    """The schema version a database says it was written with, or ``unknown`` when it says none."""
+    try:
+        cursor = connection.execute("SELECT value FROM meta WHERE key = ?", (_META_SCHEMA_VERSION,))
+    except sqlite3.Error:
+        return "unknown"
+    record = cursor.fetchone()
+    return "unknown" if record is None else str(record["value"])
 
 
 def _ensure_schema(connection: sqlite3.Connection) -> None:

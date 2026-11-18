@@ -11,7 +11,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from worc_connect.core.items import PullRequest, PullRequestState, WorkItem, WorkItemState
+from worc_connect.core.items import (
+    ItemHeadline,
+    PullRequest,
+    PullRequestState,
+    Reply,
+    WorkItem,
+    WorkItemState,
+)
 from worc_connect.trackers.base import TrackerUnavailable
 
 
@@ -52,6 +59,32 @@ def work_item(entry: dict[str, Any], *, state: WorkItemState | None) -> WorkItem
         updated_at=_timestamp(entry.get("updatedAt"), field="updatedAt"),
         url=_string(entry, "url"),
     )
+
+
+def replies(payload: Any, *, since: datetime) -> list[Reply]:
+    """The comments of an issue payload posted after ``since``, oldest first.
+
+    A comment a maintainer minimized — hidden as spam, off-topic or abuse — is left out: hiding it
+    is the repository's own verdict that nobody should act on it, a triage run included.
+    """
+    if not isinstance(payload, dict):
+        raise TrackerUnavailable("`gh issue view` returned no issue object")
+    found: list[Reply] = []
+    for entry in entries(payload.get("comments") or []):
+        created = _timestamp(entry.get("createdAt"), field="createdAt")
+        if created <= since or entry.get("isMinimized") is True:
+            continue
+        found.append(Reply(author=_author(entry), created_at=created, body=_string(entry, "body")))
+    return sorted(found, key=lambda reply: reply.created_at)
+
+
+def headlines(payload: Any) -> list[ItemHeadline]:
+    """A listing of issues reduced to number and title, in the order the listing gave them."""
+    return [
+        ItemHeadline(identifier=str(number), title=_string(entry, "title"))
+        for entry in entries(payload)
+        if isinstance(number := entry.get("number"), int)
+    ]
 
 
 def _string(entry: dict[str, Any], field: str) -> str:

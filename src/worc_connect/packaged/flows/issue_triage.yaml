@@ -7,7 +7,9 @@
 #   * it publishes nothing (`publishing: none`) and opens no pull request, so the analysis of an
 #     untrusted report can never become a change anybody has to review;
 #   * every write goes into the report directory (`report_dir`), which is the connector's own home
-#     and is gitignored, so the reproduction node cannot leave a file behind in the tree.
+#     and is gitignored, so the reproduction node cannot leave a file git would commit. A project
+#     tool that ignores `.gitignore` would still read its scratch, so the node is asked to delete it
+#     and the connector removes whatever is left beside the report once it has read the report.
 #
 # The deliverable is one report the connector reads and acts on by itself. The verdict block at the
 # end of it is the only part read by a machine; everything else in the report is for the operator.

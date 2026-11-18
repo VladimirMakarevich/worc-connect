@@ -11,11 +11,13 @@ restarted connector with no database at all still writes nothing it has already 
 changes, with one exception keyed on the task rather than the label: each task is announced as
 queued exactly once, even on an item already labelled ``queued`` — which is how the implementation
 task a fast triage produced still gets named. That keeps them idempotent: a quiet tick posts
-nothing, a rebuilt row posts nothing, and the same failure is never reported twice. Every body is a
+nothing, a rebuilt row posts nothing, and the same failure is never reported twice. The pull
+request's link is keyed on the row too: posted once per attempt, on the move into ``pr-open`` or —
+for a request worc merged before any tick saw it open — on the move into ``done``. Every body is a
 template this package wrote, carrying a task id, a status name and URLs — never the item's own text,
-never a log line, never a diff, and never anything read out of worc's home. Bodies travel as files;
-the closing message is the one exception the tracker's own command shape forces, and it is a
-template too.
+never a log line, never a diff, and never anything read out of worc's home. Every body travels as a
+file, the closing message included: it is posted as a comment, and the close that follows carries
+no text at all — which is also what keeps the message when the code host closed the item first.
 
 **One kind of body carries text this package did not write**: the reason a triage verdict gives,
 which is prose the triage agent produced. It is published unchanged because the person who has to
@@ -34,7 +36,7 @@ from pathlib import Path
 from typing import Final
 
 from worc_connect.config import ConnectorConfig
-from worc_connect.core.items import ItemState, WorkItem
+from worc_connect.core.items import ItemState, WorkItem, WorkItemState
 from worc_connect.core.state import ItemRow, Phase, Stage
 from worc_connect.trackers.base import TrackerAdapter
 
@@ -151,17 +153,43 @@ class WriteBack:
         strongest action on an item, and it must happen only where the pull request was actually
         merged — never merely because a row reached a terminal phase.
         """
-        if state is ItemState.DONE and row.pr_merged and self.config.write_back.close_on_merge:
-            self.adapter.close(item.identifier, _closing_message(row))
-            _log(row, "close", "merged")
-            return Published.CLOSED
+        if state is ItemState.DONE and row.pr_merged:
+            return self._merged(row, item)
         return self._comment(row, item, state)
+
+    def _merged(self, row: ItemRow, item: WorkItem) -> Published:
+        """The move into ``done`` through a merge: the message, then the close where it is wanted.
+
+        The message goes first and as a comment, because the code host may already have closed the
+        item — the pull request carries its closing keyword, and the merge fires it — and a close
+        on a closed item posts nothing. The close itself is asked for only of an item still open,
+        so the log says ``merged`` only where the connector closed it. Either way the item is
+        closed by the merge, which is what arms a later trigger as a new request.
+        """
+        if not self.config.write_back.close_on_merge:
+            if not row.pr_announced and row.pr_url and self.config.write_back.comment:
+                self._post(row, item, _merged_body(row), ItemState.DONE)
+            return Published.SHOWN
+        # Posted whatever `write_back.comment` says, as the closing message always was: closing an
+        # item with no word on it would leave a reader nothing to follow back to the change.
+        self._post(row, item, _closing_message(row), ItemState.DONE)
+        if item.state is WorkItemState.OPEN:
+            self.adapter.close(item.identifier)
+            _log(row, "close", "merged")
+        else:
+            _log(row, "close", "already-closed")
+        return Published.CLOSED
 
     def _comment(self, row: ItemRow, item: WorkItem, state: ItemState) -> Published:
         """Post the comment a move into ``state`` deserves, if any and if comments are on."""
         body = _comment_body(row, state)
         if body is None or not self.config.write_back.comment:
             return Published.SHOWN
+        self._post(row, item, body, state)
+        return Published.SHOWN
+
+    def _post(self, row: ItemRow, item: WorkItem, body: str, state: ItemState) -> None:
+        """Hand ``body`` to the tracker as a file — the only way any body leaves this package."""
         with tempfile.TemporaryDirectory(prefix="worc-connect-") as directory:
             # Outside the clone on purpose: the only path the connector writes there is the task
             # file, and a transient body has no business next to worc's lifecycle tree.
@@ -169,7 +197,6 @@ class WriteBack:
             path.write_text(body, encoding="utf-8", newline="")
             self.adapter.comment(item.identifier, path)
         _log(row, "comment", str(state))
-        return Published.SHOWN
 
 
 def _comment_body(row: ItemRow, state: ItemState) -> str | None:
@@ -179,7 +206,9 @@ def _comment_body(row: ItemRow, state: ItemState) -> str | None:
     ended without one, and the two a triage verdict ends an item in — where the whole point is the
     reason, because ``needs-info`` without the question is a label nobody can answer.
     ``in-progress`` is not — the label already says it, and a comment per step would bury the item's
-    own conversation. Nor is ``done``, whose closing message says it.
+    own conversation. Nor is ``done``, whose closing message says it. A pull request the item was
+    already told about — reopened after a close — is not announced again; one a follow-up attempt
+    continued is announced as continued, not as opened.
 
     The triage reason is **prose an agent wrote**, and it is published as the agent wrote it. That
     is a deliberate, recorded choice rather than an oversight: the reporter is the person who has to
@@ -190,7 +219,7 @@ def _comment_body(row: ItemRow, state: ItemState) -> str | None:
     if state is ItemState.QUEUED:
         return _queued_body(row, task)
     if state is ItemState.PR_OPEN and row.pr_url:
-        return f"worc task `{task}` opened a pull request: {row.pr_url}\n"
+        return _pull_request_body(row, task)
     if state is ItemState.FAILED:
         return _failure_body(row, task)
     if state is ItemState.NEEDS_INFO:
@@ -222,6 +251,15 @@ def _queued_body(row: ItemRow, task: str) -> str:
     return f"Queued as worc implementation task `{task}`.\n"
 
 
+def _pull_request_body(row: ItemRow, task: str) -> str | None:
+    """The link to the pull request, once per attempt, worded for what the attempt did with it."""
+    if row.pr_announced:
+        return None
+    if row.continued_pr is not None and row.continued_pr == row.pr_number:
+        return f"worc task `{task}` continued the open pull request: {row.pr_url}\n"
+    return f"worc task `{task}` opened a pull request: {row.pr_url}\n"
+
+
 def _failure_body(row: ItemRow, task: str) -> str:
     """Why the task ended without a pull request, in as much detail as worc itself published.
 
@@ -233,6 +271,12 @@ def _failure_body(row: ItemRow, task: str) -> str:
     """
     if row.research_note:
         return f"worc task `{task}` produced no work: {row.research_note}.\n"
+    if row.pr_number is not None and not row.pr_merged:
+        return (
+            f"The pull request of worc task `{task}` was closed without being merged: "
+            f"{row.pr_url}\n\nReopen it and the connector follows it again. To start over from "
+            "this issue instead, take the trigger label off and put it back.\n"
+        )
     if row.validation_reason:
         return (
             f"worc's validation gate refused task `{task}`: `{row.validation_reason}`.\n\n"
@@ -250,7 +294,15 @@ def _failure_body(row: ItemRow, task: str) -> str:
 def _closing_message(row: ItemRow) -> str:
     """The closing message, carrying only the task id and the pull-request URL."""
     reference = f" ({row.pr_url})" if row.pr_url else ""
-    return f"Closed by the merged pull request of worc task `{row.task_id}`{reference}."
+    return f"Closed by the merged pull request of worc task `{row.task_id}`{reference}.\n"
+
+
+def _merged_body(row: ItemRow) -> str:
+    """The link to a pull request that was merged before the item was ever told about it.
+
+    Worded for either way the task came to it — opened, or continued as a follow-up.
+    """
+    return f"The pull request of worc task `{row.task_id}` was merged: {row.pr_url}\n"
 
 
 def _log(row: ItemRow, action: str, result: str) -> None:

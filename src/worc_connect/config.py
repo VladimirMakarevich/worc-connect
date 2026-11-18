@@ -284,6 +284,29 @@ def _refuse_state_labels(task: TaskConfig, labels_prefix: str) -> None:
                 )
 
 
+def _refuse_trigger_labels(task: TaskConfig, gate: GateConfig) -> None:
+    """Refuse a dispatch label that is also a trigger label.
+
+    Every item the gate admits through a label carries it, so a trigger label in
+    ``auto_merge_labels`` would merge every gated task with nobody in between — the opposite of a
+    per-item opt-in, hidden behind a key that reads as one. In ``task_type_by_label`` it would pick
+    every task's flow, which ``task_type`` already says plainly. Compared case-insensitively.
+    """
+    triggers = {label.casefold() for label in gate.labels}
+    keyed = (
+        ("task.task_type_by_label", tuple(task.task_type_by_label)),
+        ("task.auto_merge_labels", task.auto_merge_labels),
+    )
+    for key, labels in keyed:
+        for label in labels:
+            if label.casefold() in triggers:
+                raise ConfigError(
+                    f"`{key}` names `{label}`, which is also a `gate.labels` trigger label and so "
+                    "is on every gated item; set the value for every task with the plain key, or "
+                    "pick a label maintainers apply on purpose"
+                )
+
+
 def is_repo_relative_dir(value: str) -> bool:
     """Whether ``value`` names a directory inside the clone, on every operating system.
 
@@ -417,6 +440,7 @@ def load(path: Path) -> ConnectorConfig:
     worc = _worc(document.section("worc"), clone_root=path.parent.parent)
     write_back = _write_back(document.section("write_back"))
     _refuse_state_labels(task, write_back.labels_prefix)
+    _refuse_trigger_labels(task, gate)
     return ConnectorConfig(
         schema_version=version,
         tracker=tracker,

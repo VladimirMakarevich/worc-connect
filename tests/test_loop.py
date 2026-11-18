@@ -390,7 +390,7 @@ def test_the_stub_models_the_window_the_close_and_the_stamp_a_write_leaves() -> 
     assert [item.identifier for item in adapter.list_items(UPDATED)] == ["142", "143"]
     assert [item.identifier for item in adapter.list_items(None)] == ["141", "142", "143"]
 
-    adapter.close("142", "closed")
+    adapter.close("142")
 
     assert [item.identifier for item in adapter.list_items(None)] == ["141", "143"]
     assert adapter.get_item("142").state is WorkItemState.CLOSED

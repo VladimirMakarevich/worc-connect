@@ -45,9 +45,9 @@ A tick with nothing new writes nothing at all. A tick in which the tracker is un
 | `staged` | — | The file is in `preparing/` but `promote` has not run or did not finish. Re-derived from disk next tick. |
 | `queued` | `worc:queued` | worc has the task. |
 | `running` | `worc:in-progress` | worc reports it running. |
-| `pr-open` | `worc:pr-open` | The task opened a pull request; the URL is commented. |
-| `done` | `worc:done` | The PR merged (and the issue closed), or the task finished without one. |
-| `failed` | `worc:failed` | The task ended with no PR, the PR was closed unmerged, or worc's validation gate refused the task. |
+| `pr-open` | `worc:pr-open` | The task opened a pull request; the URL is commented — once per attempt, so a request reopened after a close is not announced again, and a follow-up that continued it says it continued it. |
+| `done` | `worc:done` | The PR merged (and the issue closed — the closing message is a comment, posted even when GitHub closed the issue first), or the task finished without one. A PR merged before any tick saw it open gets its link here instead. |
+| `failed` | `worc:failed` | The task ended with no PR, the PR was closed unmerged (the comment names it), or worc's validation gate refused the task. |
 | `researched` / `needs-info` / `declined` | — / `worc:needs-info` / `worc:declined` | Triage outcomes — see [triage](triage.md). |
 
 The phases the operator never sees a label for (`gated`, `staged`, `researched`) are bookkeeping: a task file written but not yet promoted, or a triage report already acted on.
@@ -84,11 +84,11 @@ Everything lives in `.worc-connect/`, a sibling of worc's `.worc/` and never ins
 | `connect.log` | One line per action: `item=… task=… action=… result=…`. Ids and URLs are the only item-derived values in it. Rotated at 5 MB, three files kept. | Yes. |
 | `connect.pid` | Held while a `watch` daemon runs, removed on a clean exit. A second watcher in the same clone refuses to start while it exists. | Only after a crash — liveness is deliberately not guessed at. |
 | `connect.stop` | The stop sentinel. Create it and the loop exits before its next tick and removes it. | Yes. |
-| `triage/<task-id>/report.md` | Where the triage flow leaves its report, in a directory the connector owns. | Yes, once the attempt is over. |
+| `triage/<task-id>/report.md` | Where the triage flow leaves its report, in a directory the connector owns. Whatever else the triage task wrote there is deleted by the connector once the task is over. | Yes, once the attempt is over. |
 
 ## What can and cannot reach an agent
 
-Issue text is untrusted input from strangers, and it has exactly **one** destination: the body of the task file, verbatim, under a provenance line. It is never an argument, an environment value, a log line, a label, or a comment. Comment bodies are templates this package wrote, carrying a task id, a status name and URLs, and they reach the tracker as _files_ rather than as command arguments.
+Issue text is untrusted input from strangers, and it has exactly **one** destination: the body of the task file, verbatim, under a provenance line. With the [triage step](triage.md) on, the replies posted after a triage question and the other open issues' titles are issue text too, and they go to the same place and nowhere else. It is never an argument, an environment value, a log line, a label, or a comment. Comment bodies are templates this package wrote, carrying a task id, a status name and URLs, and they reach the tracker as _files_ rather than as command arguments.
 
 The task file the connector writes cannot weaken worc either: its key set is a strict subset of worc's allowed keys and can never carry `extra_args`, a permission profile, a flow edit, or `auto_merge` unless you configured it. `gh` and `worc` are launched as argument lists resolved with `shutil.which`, never through a shell, and pinned with `--repo OWNER/REPO` from your configuration.
 

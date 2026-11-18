@@ -337,3 +337,78 @@ def test_the_entry_point_factory_builds_a_pinned_adapter(fake_gh: FakeGh) -> Non
 
     argv = fake_gh.calls_for("issue list")[0]
     assert argv[argv.index("--repo") + 1] == "OTHER/THING"
+
+
+# --- what a triage run is shown besides the item ------------------------------------------------
+
+
+def comment_payload(body: str, created: str, *, login: str = "reporter", **extra: object) -> dict:
+    return {"author": {"login": login}, "body": body, "createdAt": created, **extra}
+
+
+def test_replies_are_read_by_number_and_only_after_the_question(fake_gh: FakeGh) -> None:
+    fake_gh.respond(
+        "issue view",
+        payload={
+            "comments": [
+                comment_payload("Triage needs more", "2026-09-10T09:59:00Z", login="op"),
+                comment_payload("It happens on 2.3.1, see the sample", "2026-09-10T10:05:00Z"),
+                comment_payload("same at the stamp itself", "2026-09-10T10:00:00Z"),
+            ]
+        },
+    )
+
+    replies = adapter().replies("142", since=SINCE)
+
+    assert [(reply.author, reply.body) for reply in replies] == [
+        ("reporter", "It happens on 2.3.1, see the sample")
+    ]
+    argv = fake_gh.calls_for("issue view")[0]
+    assert argv[:3] == ["issue", "view", "142"]
+    assert argv[argv.index("--json") + 1] == "comments"
+    assert argv[argv.index("--repo") + 1] == "OWNER/REPO"
+    # The reply's text reached the connector through stdout, never through an argument.
+    assert not any("2.3.1" in argument for argument in argv)
+
+
+def test_a_minimized_reply_is_not_read_back(fake_gh: FakeGh) -> None:
+    fake_gh.respond(
+        "issue view",
+        payload={
+            "comments": [
+                comment_payload("spam", "2026-09-10T10:05:00Z", isMinimized=True),
+                comment_payload("the answer", "2026-09-10T10:06:00Z", isMinimized=False),
+            ]
+        },
+    )
+
+    assert [reply.body for reply in adapter().replies("142", since=SINCE)] == ["the answer"]
+
+
+def test_an_identifier_that_is_not_a_number_never_reaches_the_replies_call(
+    fake_gh: FakeGh,
+) -> None:
+    with pytest.raises(TrackerUnavailable):
+        adapter().replies("--repo=evil/x", since=SINCE)
+
+    assert fake_gh.calls == []
+
+
+def test_the_open_items_are_listed_by_number_and_title_only(fake_gh: FakeGh) -> None:
+    fake_gh.respond(
+        "issue list",
+        payload=[{"number": 32, "title": "REF-007: CRLF fixture"}, {"number": 7, "title": "x"}],
+    )
+
+    headlines = adapter().open_items()
+
+    assert [(entry.identifier, entry.title) for entry in headlines] == [
+        ("32", "REF-007: CRLF fixture"),
+        ("7", "x"),
+    ]
+    argv = fake_gh.calls_for("issue list")[0]
+    assert argv[argv.index("--state") + 1] == "open"
+    assert argv[argv.index("--json") + 1] == "number,title"
+    assert argv[argv.index("--limit") + 1] == "200"
+    # Newest first, which is `gh`'s own order: no search, so no index lag and no relevance sort.
+    assert "--search" not in argv

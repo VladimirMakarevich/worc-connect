@@ -235,10 +235,11 @@ def test_a_merged_pull_request_closes_the_item_with_a_message(clone: Path) -> No
     )
 
     assert adapter.states == [("142", "done", "pr-open")]
-    identifier, message = adapter.closed[0]
+    assert adapter.closed == ["142"]
+    # The closing message is a comment of its own, posted before the close and through a file.
+    identifier, message = adapter.comments[0]
     assert identifier == "142"
     assert "gh-142" in message and url in message
-    assert adapter.comments == []  # the closing message is the comment
 
 
 def test_close_on_merge_off_still_labels_the_item_done(clone: Path) -> None:

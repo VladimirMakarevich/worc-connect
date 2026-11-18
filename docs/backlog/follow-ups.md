@@ -21,3 +21,17 @@ An entry leaves this page when the decision is revisited — either because the 
 **Where it lives.** `_comment_body` in `src/worc_connect/core/writeback.py`, and the two module docstrings there and in `src/worc_connect/core/triage.py` that state the choice.
 
 **Revisited:** 2026-09-11, by the [local-research](local-research/README.md) record (D13, FR-R10a): the operator chose the least restrictive shape this entry anticipated — one `reason` paragraph, capped, blockquoted, with `@` and `#` defused — applied to **both** report producers through the one `_comment_body`, and extended to the `actionable` verdict so the reporter is also told their issue was reproduced. This entry leaves the page when that record's phase 04 lands; until then the behaviour above is what ships.
+
+## FU-2 — A failed task is watched for `worc rerun` for seven days, not for ever
+
+**Decided:** 2026-11-18, fixing F-8 of the second real run ([real-run-plan.md](tracker-connector/real-run-plan.md)).
+
+**What happens.** A row worc ended `failed` or `manual_action_required`, with no pull request, is checked against `worc list --format json --all` on every tick for `RERUN_WINDOW` — seven days after the failure. Once worc lists the task as queued, running or done again, the item is read by identifier and followed to the end, a closed item included. After the window the row is no longer checked, and a quiet tick launches no worc at all again.
+
+**Why.** Following every failure for ever would cost one `worc list` per tick for the life of the repository, for failures nobody will rerun. A week covers an operator who looks at a failure after a weekend.
+
+**What it costs.** A rerun later than seven days after the failure is not seen: the item keeps `worc:failed` after the rerun's pull request merges, and the operator fixes the label by hand (the operations guide says so).
+
+**What would make it worth changing.** A late rerun that went unseen in practice, or worc gaining a cheaper signal than its listing for "this task is running again". The window is one constant in `src/worc_connect/core/reconcile.py`; making it a configuration key is the likely next step.
+
+**Where it lives.** `RERUN_WINDOW` and `awaits_rerun` in `src/worc_connect/core/reconcile.py`, used by `src/worc_connect/core/follow.py`.

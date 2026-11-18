@@ -22,7 +22,7 @@ failing_test:
 
 Rules for the block:
 
-- `verdict` is one of the four words, and nothing else. Pick `actionable` only when the change is clear enough to be implemented from this report alone; `needs-info` when a fact only the reporter has is missing; `duplicate` when this repository already tracks or has fixed it (name what, in `duplicate_of`); `declined` when it is outside what this project does.
+- `verdict` is one of the four words, and nothing else. Pick `actionable` only when the change is clear enough to be implemented from this report alone; `needs-info` when a fact only the reporter has is missing; `duplicate` when this repository already tracks or has fixed it — another open issue in the list the task file carries, or a fix already in the code (name what, in `duplicate_of`: an open issue as `"#<number>"`); `declined` when it is outside what this project does.
 - `reason` is required for every verdict. What it says is published where the reporter reads it.
 - `acceptance_criteria` is a list of observable outcomes, or omitted. Include it only for `actionable`, and only criteria the analysis actually supports.
 - `failing_test` carries the reproduction as text — `body` the test itself, `path` where it belongs — or is omitted when there is none. Do not point at a file: nothing you wrote survives this run.

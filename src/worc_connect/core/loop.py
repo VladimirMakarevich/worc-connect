@@ -30,6 +30,7 @@ from typing import Final
 from worc_connect.config import ConnectorConfig
 from worc_connect.core import builder, gate
 from worc_connect.core.control import ProcessControl
+from worc_connect.core.follow import Follower
 from worc_connect.core.items import WorkItem
 from worc_connect.core.plan import Action, PlannedAction, TickReport
 from worc_connect.core.reconcile import Reconciler
@@ -61,6 +62,9 @@ WATERMARK_OVERLAP: Final = timedelta(minutes=10)
 # problem is exit 2 and never reaches this module — the CLI refuses before a loop exists.
 _EXIT_OK: Final = 0
 _EXIT_FAILED: Final = 1
+
+# The phases whose move tells the item the link to its pull request, once per attempt.
+_LINK_PHASES: Final = frozenset({Phase.PR_OPEN, Phase.DONE})
 
 # Why an item that shows a connector state but has no task behind it is left alone. Logged and
 # printed verbatim, like a gate reason.
@@ -147,7 +151,6 @@ class Watcher:
             # label is what lets a maintainer gate an item at all, so its creation cannot wait for
             # the first state write. A dry run promises to write nothing, labels included.
             self._write_back.ensure_labels()
-        items = [*listed, *self._followed(listed)]
         reconciler = Reconciler(
             config=self.config,
             store=self.store,
@@ -155,6 +158,8 @@ class Watcher:
             adapter=self.adapter,
             home=self.home,
         )
+        follower = Follower(adapter=self.adapter, store=self.store, tracker=self.config.tracker)
+        items = [*listed, *follower.items(listed, taken_back=reconciler.taken_back, now=now)]
         write_back = self._write_back
         actions = tuple(
             self._plan(item, reconciler=reconciler, write_back=write_back, dry_run=dry_run, now=now)
@@ -218,33 +223,6 @@ class Watcher:
         watermark = read_watermark(self.store)
         return None if watermark is None else watermark - WATERMARK_OVERLAP
 
-    def _followed(self, listed: Sequence[WorkItem]) -> list[WorkItem]:
-        """The items with a task still in flight that the listing left out, read one by one.
-
-        Between the queue and the pull request the connector's own writes are the last thing that
-        touched an item, and one comment on any other item moves the poll window past it for good;
-        a row that is never listed again would never be advanced. So every item with a live row is
-        read by identifier when the listing did not return it — an item closed by hand included,
-        since its task is still worc's. An item that cannot be read costs its row one tick, not the
-        whole tick: the row stays where it was, and the next tick asks again.
-        """
-        seen = {item.identifier for item in listed}
-        followed: list[WorkItem] = []
-        for row in self.store.live_rows(self.config.tracker):
-            if row.item_id in seen:
-                continue
-            try:
-                followed.append(self.adapter.get_item(row.item_id))
-            except TrackerError as exc:
-                logger.warning(
-                    "item=%s task=%s action=fetch result=skipped-%s (%s)",
-                    row.item_id,
-                    row.task_id or "-",
-                    type(exc).__name__,
-                    exc,
-                )
-        return followed
-
     def _plan(
         self,
         item: WorkItem,
@@ -276,11 +254,9 @@ class Watcher:
         if not verdict.admitted:
             _log(item, None, Action.SKIP, str(verdict.reason))
             return PlannedAction(item.identifier, item.url, Action.SKIP, str(verdict.reason))
-        seq = 1 if row is None else row.seq + 1
-        branch = row.branch if row is not None and row.phase is Phase.PR_OPEN else None
         return self._take_on(
             item,
-            attempt=(seq, branch),
+            previous=row,
             reason=str(verdict.reason),
             work=(reconciler, write_back),
             dry_run=dry_run,
@@ -310,7 +286,7 @@ class Watcher:
         self,
         item: WorkItem,
         *,
-        attempt: tuple[int, str | None],
+        previous: ItemRow | None,
         reason: str,
         work: tuple[Reconciler, WriteBack],
         dry_run: bool,
@@ -318,20 +294,19 @@ class Watcher:
     ) -> PlannedAction:
         """Record one attempt at ``item`` and hand it over, or describe that for a dry run.
 
-        ``attempt`` is the sequence number and, when the previous attempt's pull request is still
-        open, the branch to continue: worc then appends to that request instead of opening a
-        second one for the same item.
+        ``previous`` is the item's last attempt, if it had one: the new one takes the next sequence
+        number and, when that attempt's pull request is still open, continues its branch — worc
+        then appends to that request instead of opening a second one for the same item.
         """
-        seq, branch_ref = attempt
-        row = self._new_row(item, seq=seq, branch=branch_ref, now=now)
+        row = self._new_row(item, previous=previous, now=now)
         if dry_run:
-            # The builder is pure, so the plan can name the id and the branch the real tick would
-            # allocate without anything being written anywhere — the triage task's, where the
-            # analysis step is on, because that is the task this tick would actually queue.
+            # The builder is pure, so the plan can name the id, the branch and the choices the real
+            # tick would make without anything being written anywhere — the triage task's, where
+            # the analysis step is on, because that is the task this tick would actually queue.
             draft = (
-                builder.build_research(item, self.config, seq=seq)
+                builder.build_research(item, self.config, seq=row.seq)
                 if self.config.research.in_worc
-                else builder.build(item, self.config, seq=seq, branch_ref=branch_ref)
+                else builder.build(item, self.config, seq=row.seq, branch_ref=row.branch)
             )
             _log(item, draft.task_id, Action.STAGE, reason)
             return PlannedAction(
@@ -342,6 +317,8 @@ class Watcher:
                 draft.task_id,
                 draft.branch,
                 str(PHASE_STATES[Phase.QUEUED]),
+                task_type=draft.task_type,
+                auto_merge=draft.auto_merge,
             )
         self.store.save(row)
         return self._carry_out(item, row, work=work, action=Action.STAGE, reason=reason, now=now)
@@ -394,11 +371,7 @@ class Watcher:
         reconciler, write_back = work
         moved = reconciler.advance(row, item, now=now)
         published = write_back.publish(moved, item)
-        if moved.phase is Phase.QUEUED and not moved.queued_announced:
-            # Recorded only once the publish returned: a comment a failed tracker call lost is
-            # posted on the next tick rather than forgotten.
-            moved = replace(moved, queued_announced=True)
-            self.store.save(moved)
+        moved = self._announced(moved)
         if published is Published.CLOSED:
             moved = self._retrigger.closed(moved, now=now)
         elif published is Published.SHOWN and moved.phase is Phase.NEEDS_INFO:
@@ -408,11 +381,27 @@ class Watcher:
             moved.task_id,
             action,
             reason if action is Action.STAGE else str(moved.phase),
-            worc=moved.last_status,
+            worc=reconciler.heard(moved.task_id),
         )
         return self._planned(
             item, moved, action, reason if action is Action.STAGE else str(moved.phase)
         )
+
+    def _announced(self, row: ItemRow) -> ItemRow:
+        """Record what the publish just told the item, so it is never told the same thing twice.
+
+        Recorded only once the publish returned: a queued comment a failed tracker call lost is
+        posted on the next tick rather than forgotten. The pull request's link counts as told on
+        the move into ``pr-open`` or ``done`` whatever the publish decided to say about it.
+        """
+        told = row
+        if row.phase is Phase.QUEUED and not row.queued_announced:
+            told = replace(told, queued_announced=True)
+        if row.phase in _LINK_PHASES and row.pr_url and not row.pr_announced:
+            told = replace(told, pr_announced=True)
+        if told != row:
+            self.store.save(told)
+        return told
 
     @staticmethod
     def _planned(item: WorkItem, row: ItemRow, action: Action, reason: str) -> PlannedAction:
@@ -428,22 +417,25 @@ class Watcher:
             None if state is None else str(state),
         )
 
-    def _new_row(self, item: WorkItem, *, seq: int, branch: str | None, now: datetime) -> ItemRow:
+    def _new_row(self, item: WorkItem, *, previous: ItemRow | None, now: datetime) -> ItemRow:
         """The row an attempt at an admitted item starts from.
 
         A branch already on a brand-new row is not a leftover: it is the previous attempt's, and it
-        tells the builder to continue that branch and its pull request.
+        tells the builder to continue that branch and its pull request — which the row remembers,
+        so the item is told the request was continued rather than opened.
         """
+        continues = previous is not None and previous.phase is Phase.PR_OPEN
         return ItemRow(
             tracker=self.config.tracker,
             item_id=item.identifier,
-            seq=seq,
+            seq=1 if previous is None else previous.seq + 1,
             phase=Phase.GATED,
             created_at=now,
             updated_at=now,
-            branch=branch,
+            branch=previous.branch if previous is not None and continues else None,
             item_updated_at=item.updated_at,
             stage=Stage.RESEARCH if self.config.research.in_worc else Stage.IMPLEMENTATION,
+            continued_pr=previous.pr_number if previous is not None and continues else None,
         )
 
     def _advance_watermark(self, items: Sequence[WorkItem], *, dry_run: bool) -> datetime | None:

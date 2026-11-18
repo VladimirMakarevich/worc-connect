@@ -45,7 +45,7 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 - **Then** the front matter carries `commit_type: fix` and no `auto_merge` key; with `task.auto_merge: true` configured the key appears as `auto_merge: true`.
 - **Given** `task.task_type_by_label: { "flow:quick": quick_fix }` and `task.auto_merge_labels: [automerge]`
 - **When** an item labelled `worc`, `flow:quick` and `automerge` is built
-- **Then** the front matter carries `task_type: quick_fix` and `auto_merge: true`; an item with neither label carries the configured `task_type` and no `auto_merge` key; a triage task for the same item keeps the triage flow; and a configuration naming a label under `write_back.labels_prefix` in either key is refused at load.
+- **Then** the front matter carries `task_type: quick_fix` and `auto_merge: true`; an item with neither label carries the configured `task_type` and no `auto_merge` key; a triage task for the same item keeps the triage flow and carries neither `auto_merge` nor `commit_type`; and a configuration naming, in either key, a label under `write_back.labels_prefix` or a `gate.labels` trigger label is refused at load.
 
 ### AC-7 — handoff only through the public ingress (FR-C7)
 
@@ -70,11 +70,12 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 - **Given** the lifecycle of one item
 - **When** the task is queued, its PR is found, and (in a second scenario) it ends in `manual_action_required`
 - **Then** three comment bodies exist in the recorded `--body-file` files: one naming `gh-142`, one containing the PR URL, one naming `manual_action_required` and `worc status gh-142`; none contains the item's body text, a log line, or a diff.
+- **And** the PR URL is commented once per attempt: a PR merged before any tick saw it open gets it on the move into `done`, a PR reopened after a close gets no second one, and a follow-up that continued an open PR says it continued it.
 
 ### AC-11 — close on merge is configurable (FR-C11)
 
 - **Given** the PR for the task branch reports `mergedAt` set
-- **When** a tick runs with `close_on_merge: true` → `gh issue close` is recorded with a comment file; with `close_on_merge: false` → no `close` call, the label still becomes `worc:done`.
+- **When** a tick runs with `close_on_merge: true` → a closing comment naming the task and the PR is posted through a body file, then `gh issue close` (no text of its own) is recorded only if the item is still open — an item GitHub already closed through `Fixes #<n>` gets the comment and no close, and the log says `close result=already-closed`; with `close_on_merge: false` → no `close` call, the label still becomes `worc:done`.
 
 ### AC-12 — status from the sources of truth (FR-C12)
 
@@ -99,7 +100,7 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 - **Given** `research.mode: off` (the default)
 - **When** a gated item is processed → one task is created and no flow file is written into `.worc/flows/`.
 - **Given** `research.mode: worc` and `install-flow` has been run
-- **When** a gated item is processed → the first task carries the triage `task_type` and `priority: high`; when the fake `worc` reports it `done` and a report exists at `.worc-connect/triage/<task_id>/report.md` whose verdict is `actionable`, the same builder produces the implementation task under the next id (`gh-142.2`) with the report's acceptance criteria and failing test in its body; with verdict `needs-info` no implementation task is created and the item receives `worc:needs-info` and a comment carrying the question, and the reporter replying re-runs triage; with `duplicate` or `declined` the item receives `worc:declined` and the reason; with the task `done` and no readable report the item receives `worc:failed` and a comment naming the path that was looked at — nothing under `.worc/` is read.
+- **When** a gated item is processed → the first task carries the triage `task_type` and `priority: high`; when the fake `worc` reports it `done` and a report exists at `.worc-connect/triage/<task_id>/report.md` whose verdict is `actionable`, the same builder produces the implementation task under the next id (`gh-142.2`) with the report's acceptance criteria and failing test in its body; with verdict `needs-info` no implementation task is created and the item receives `worc:needs-info` and a comment carrying the question, and the reporter replying re-runs triage with the replies posted after the question in the new triage task's body (the connector's own question never among them); the triage task's body also lists the other open items by number and title; with `duplicate` or `declined` the item receives `worc:declined` and the reason; with the task `done` and no readable report the item receives `worc:failed` and a comment naming the path that was looked at — nothing under `.worc/` is read.
 
 ### AC-18 — the worc contract is adopted only where worc offers it (FR-C4, FR-C11, FR-C12)
 
@@ -160,12 +161,14 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 - **AC-E1** — `gh` exits with an auth error → the tick is skipped, logged as `TrackerAuth`, no state changes, the process stays up for the next tick.
 - **AC-E2** — `worc promote` reports "already in pending — not overwriting" → the row becomes `queued`, no error is surfaced to the tracker.
 - **AC-E3** — worc's gate rejects the task (the fake `worc` moves the file out of `pending/` and its `list --format json --all` fixture has no row for the id — which is what a real reject looks like from outside `.worc/`) → the row becomes `failed`, the label is `worc:failed`, and the comment names the task id and `worc status <id>` and contains no worc text. With a fake `worc` whose `--all` listing carries a `rejected` entry for the id (FR-W3, adopted in phase 06) the comment additionally names its `validation_reason` — that string and nothing else from the entry.
-- **AC-E4** — the PR is closed without merge → `failed` with a comment; nothing is re-queued automatically.
+- **AC-E4** — the PR is closed without merge → `failed` with a comment that links the PR and says it was closed unmerged; nothing is re-queued automatically.
 - **AC-E5** — the item loses the trigger label while `queued` → nothing changes on the task; a log line notes it.
 - **AC-E6** — the watermark is ahead of an item's `updatedAt` because of clock skew inside the overlap window → the item is still listed and, having a row, is not duplicated.
 - **AC-E7** — `.worc-connect/connect.stop` appears mid-sleep → the loop exits before the next tick and removes its PID file.
 - **AC-E8** — `tasks/preparing/` does not exist → the connector creates it under the configured `worc.tasks_dir` (default `tasks`, worc's own default), then proceeds.
-- **AC-E9** — the PR is closed without merge, then reopened → the row goes `failed` with one comment, then back to `pr-open` on the next tick that sees `state: OPEN`; no second failure comment is posted for the same closure.
+- **AC-E9** — the PR is closed without merge, then reopened → the row goes `failed` with one comment, then back to `pr-open` on the next tick that sees `state: OPEN`; no second failure comment is posted for the same closure, and the PR is not announced a second time.
+- **AC-E10** — a task worc ended `failed` or `manual_action_required` is rerun by the operator (`worc rerun`) within seven days → the item follows it again (`worc:in-progress`, then the PR, then `worc:done`), a closed item included; the item is read by identifier only once `worc list --all` shows the task queued, running or done again, and a log line never quotes a status worc did not give on that tick.
+- **AC-E11** — a triage task ends (report read, no report, or failed by worc) → everything it left in `.worc-connect/triage/<task-id>/` but `report.md` is deleted, never following a link out of the directory.
 
 ## Non-functional checks
 
@@ -183,7 +186,7 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 | AC | How it is verified | Where |
 | --- | --- | --- |
 | AC-1, AC-2, AC-8, AC-9, AC-10, AC-11, AC-E1, AC-E7 | fake-`gh` integration tests (recorded argv, JSON fixtures) | connector `tests/` |
-| AC-3, AC-7, AC-12, AC-E2, AC-E3, AC-E4, AC-E8, AC-N7 | fake-`gh` + fake-`worc` integration tests | connector `tests/` |
+| AC-3, AC-7, AC-12, AC-E2, AC-E3, AC-E4, AC-E8, AC-E10, AC-E11, AC-N7 | fake-`gh` + fake-`worc` integration tests | connector `tests/` |
 | AC-16, AC-17, AC-E9 | fake-`gh` + fake-`worc` integration tests (PR fixtures by number) | connector `tests/` |
 | AC-4, AC-18 | unit tests for sanitizer/truncation + tests that import worc's real `task.validation_gate` against the generated file, with and without `references` | connector `tests/` (worc as a test dependency) |
 | AC-5, AC-6 | unit tests on the builder | connector `tests/` |

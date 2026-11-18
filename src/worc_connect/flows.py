@@ -8,12 +8,14 @@ connector did not ship.
 
 **An operator's copy is theirs.** A file already on disk that differs from the shipped one is an
 edit somebody made on purpose, and it is refused rather than overwritten unless the operator says
-otherwise in so many words. A file that is byte-identical is not an edit, so re-installing over it
-is silent — which is what makes running the command again a safe way to pick up a newer flow.
+otherwise in so many words. A file that is byte-identical to the shipped one, or to what an earlier
+release of this package shipped, is not an edit: the first is left as it is, the second is replaced
+— which is what makes running the command again a safe way to pick up a newer flow.
 """
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
 from importlib import resources
@@ -32,11 +34,31 @@ PACKAGED_FLOW: Final = "issue_triage"
 
 _PACKAGE_FLOWS: Final = ("packaged", "flows")
 
+# Every earlier shipped version of a file, by the SHA-256 of its bytes. A copy matching one is what
+# an earlier release installed, not an edit, so it is replaced without `--force`; a copy an operator
+# edited matches none and is still refused. When a shipped file changes, the hash of the version it
+# replaces is added here — forgetting to is safe, it only makes the upgrade ask for `--force`.
+_EARLIER_RELEASES: Final[dict[str, frozenset[str]]] = {
+    f"{PACKAGED_FLOW}.yaml": frozenset(
+        {"8de2ba212fd7c2651ce6a871c8f1a40f9d714c9eba77982e835403966dcfbe6f"}
+    ),
+    f"{PACKAGED_FLOW}/analysis.md": frozenset(
+        {"9011850fdae78abf41c3984a41121d200b74ad96f6efbf1392e7adb7435c8d6d"}
+    ),
+    f"{PACKAGED_FLOW}/report.md": frozenset(
+        {"14c4a714e0f770ba30d8694c1ef933fbc2407a8145c3be0f383d100436349d1d"}
+    ),
+    f"{PACKAGED_FLOW}/reproduction.md": frozenset(
+        {"753fcf9696bf7af0766721df0985a09abc1f9cc8391ebde67a5e63b90e01549d"}
+    ),
+}
+
 
 class Outcome(StrEnum):
     """What installing one file did, in the three cases an operator reacts to differently."""
 
     WRITTEN = "written"
+    UPDATED = "updated"
     UNCHANGED = "unchanged"
     REFUSED = "refused"
 
@@ -83,20 +105,23 @@ def install(target: Path, *, force: bool) -> Installed:
     results: list[tuple[str, Outcome]] = []
     for name, content in packaged().items():
         destination = target / name
-        results.append((name, _install_one(destination, content, force=force)))
+        results.append((name, _install_one(name, destination, content, force=force)))
     return Installed(results=tuple(results))
 
 
-def _install_one(destination: Path, content: bytes, *, force: bool) -> Outcome:
+def _install_one(name: str, destination: Path, content: bytes, *, force: bool) -> Outcome:
     """Write one file, or say why it was left alone."""
+    outcome = Outcome.WRITTEN
     if destination.is_file():
         existing = destination.read_bytes()
         if existing == content:
             return Outcome.UNCHANGED
-        if not force:
+        if hashlib.sha256(existing).hexdigest() in _EARLIER_RELEASES.get(name, frozenset()):
+            outcome = Outcome.UPDATED
+        elif not force:
             return Outcome.REFUSED
     destination.parent.mkdir(parents=True, exist_ok=True)
     # `newline=""` is not available on a bytes write, and is not needed: the shipped bytes are what
     # worc hashes into the flow fingerprint, so they are copied exactly as they ship.
     destination.write_bytes(content)
-    return Outcome.WRITTEN
+    return outcome

@@ -9,6 +9,7 @@ the parser proved were there.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ import yaml
 
 from support import connector_config, report_text, work_item
 from worc_connect.core import builder, triage
+from worc_connect.core.items import ItemHeadline, Reply
 from worc_connect.core.triage import Verdict
 from worc_connect.home import ConnectorHome
 
@@ -231,3 +233,61 @@ def test_the_provenance_line_survives_the_report(clone: Path) -> None:
     draft = builder.build_from_report(work_item(), connector_config(clone), report, seq=2)
 
     assert "Source: github item #142 by @reporter" in body_of(draft.content)
+
+
+# --- what a triage task is told besides the item's own text ----------------------------------
+
+
+def reply(body: str, *, author: str = "reporter", minute: int = 5) -> Reply:
+    return Reply(author=author, created_at=datetime(2026, 9, 10, 10, minute, tzinfo=UTC), body=body)
+
+
+def test_the_reporters_answer_follows_the_items_own_text(clone: Path) -> None:
+    item = work_item(body="some findings look wrong")
+
+    draft = builder.build_research(
+        item, connector_config(clone), seq=2, replies=(reply("It is the textSpans exclusion"),)
+    )
+
+    body = body_of(draft.content)
+    assert body.index("some findings look wrong") < body.index("## Replies since triage asked")
+    assert "### @reporter at 2026-09-10 10:05 UTC" in body
+    assert "It is the textSpans exclusion" in body
+    # Text from the tracker goes into the body and nowhere else: never the front matter.
+    assert "textSpans" not in draft.content.split("---\n", 2)[1]
+
+
+def test_the_other_open_items_are_listed_last_with_sanitized_titles(clone: Path) -> None:
+    others = (
+        ItemHeadline(identifier="142", title="the item itself"),
+        ItemHeadline(identifier="32", title="REF-007: CRLF fixture; `rm -rf` $(x)"),
+    )
+
+    draft = builder.build_research(work_item(), connector_config(clone), seq=1, others=others)
+
+    body = body_of(draft.content)
+    assert body.rstrip().endswith("- #32 REF-007: CRLF fixture rm -rf x)")
+    assert "## Other open issues in this repository" in body
+    assert "the item itself" not in body  # an item is never its own duplicate
+
+
+def test_the_other_items_are_what_the_limits_cut_first(clone: Path) -> None:
+    others = tuple(ItemHeadline(identifier=str(n), title=f"issue {n}") for n in range(1, 400))
+    config = connector_config(clone, max_task_lines=60)
+
+    draft = builder.build_research(
+        work_item(body="the report"), config, seq=2, replies=(reply("the answer"),), others=others
+    )
+
+    body = body_of(draft.content)
+    assert "the report" in body
+    assert "the answer" in body
+    assert "- #399 " not in body
+    assert len(draft.content.splitlines()) <= 60
+
+
+def test_an_implementation_task_has_no_open_items_section(clone: Path) -> None:
+    draft = builder.build(work_item(), connector_config(clone), seq=1)
+
+    assert "## Other open issues" not in draft.content
+    assert "## Replies since" not in draft.content

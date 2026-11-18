@@ -24,6 +24,7 @@ These documents are design detail, not an implementation contract, and must not 
 | 8 | [questions.md](questions.md) | Open questions (living) | ☑ |
 | — | [plan/README.md](plan/README.md) | Phased implementation plan (worc-side phases first, then the connector) | ☑ |
 | — | [review.md](review.md) | Deep review of the implemented connector (2026-09-12): findings, evidence, suggested order of work | — |
+| — | [real-run-plan.md](real-run-plan.md) | Real-run test plan for the per-label flow, auto-merge and the paths the first runs never took (2026-11-18): checks, results, findings, run log | — |
 
 ## How this task is being worked
 
